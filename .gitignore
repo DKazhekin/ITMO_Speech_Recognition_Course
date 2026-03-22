@@ -1,0 +1,78 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDE / editor settings
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Environment variables
+.env
+.env.local
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Data files (uncomment as needed)
+# *.csv
+# *.tsv
+# *.parquet
+# *.h5
+# *.hdf5
+# *.pkl
+# *.pickle
+
+# Audio files (uncomment as needed)
+# *.wav
+# *.mp3
+# *.flac
+# *.ogg
+# *.aac
+
+# Large model files
+*.pt
+*.pth
+*.onnx
+*.pkl
+*.joblib
+
+# Logs
+*.log
+logs/
+
+# pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# mypy
+.mypy_cache/
+
+# Data directories (uncomment as needed)
+data/
+# models/
+# outputs/
