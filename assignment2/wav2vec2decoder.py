@@ -1,5 +1,6 @@
 import math
 from typing import List, Tuple
+from collections import defaultdict
 
 import kenlm
 import torch
@@ -39,8 +40,8 @@ class Wav2Vec2Decoder:
                 Pass None to disable LM (Tasks 1–3).
             beam_width (int): Number of hypotheses kept during beam search.
             alpha (float): LM weight used in shallow fusion and rescoring.
-                score = log_p_acoustic + alpha * log_p_lm + beta * num_words
-            beta (float): Word insertion bonus (see above).
+            score = log_p_acoustic + alpha * log_p_lm + beta * num_words
+            beta (float): Word insertion bonus (penalty for long sequences).
             temperature (float): Scales acoustic logits before softmax.
                 T < 1 sharpens the distribution (model more confident).
                 T > 1 flattens it (model less confident, giving LM more
@@ -83,8 +84,13 @@ class Wav2Vec2Decoder:
         Returns:
             str: Decoded transcript.
         """
-        # <YOUR CODE GOES HERE>
-        raise NotImplementedError
+        logits_idx = torch.argmax(logits, dim=1).tolist()
+        collapsed_ids = [logits_idx[0]]
+        for i in range(1, len(logits_idx)):
+            if logits_idx[i] != collapsed_ids[-1]:
+                collapsed_ids.append(logits_idx[i])
+        blank_removed = [idx for idx in collapsed_ids if idx != self.blank_token_id]
+        return self._ids_to_text(blank_removed)
 
     def beam_search_decode(self, logits: torch.Tensor, return_beams: bool = False):
         """
@@ -103,10 +109,39 @@ class Wav2Vec2Decoder:
                 List[Tuple[List[int], float]] - list of (token_ids, log_prob)
                     tuples sorted best-first (if return_beams=True).
         """
-        # <YOUR CODE GOES HERE>
-        if return_beams:
-            raise NotImplementedError
-        raise NotImplementedError
+        
+        softmax_logits = torch.log_softmax(logits, dim=1)
+        T, _ = softmax_logits.shape
+
+        beams = {(): {"pb": 0, "pnb": float("-inf")}}
+        for t in range(T):
+            
+            ctc_probs = softmax_logits[t].tolist()
+            new_beams = defaultdict(lambda: {"pb": float("-inf"), "pnb": float("-inf")})
+            for beam, probs in beams.items():
+                for token_id, ctc_prob in enumerate(ctc_probs):
+
+                    is_repeat = (beam and beam[-1] == token_id)
+                    if token_id == self.blank_token_id:
+                        total = _log_add(probs["pb"], probs["pnb"])
+                        new_beams[beam]["pb"] = _log_add(new_beams[beam]["pb"], total + ctc_prob)
+                    else:
+                        if is_repeat:
+                            new_beams[beam]["pnb"] = _log_add(new_beams[beam]["pnb"], probs["pnb"] + ctc_prob)
+                            new_beams[beam + (token_id, )]["pnb"] = _log_add(new_beams[beam + (token_id, )]["pnb"], probs["pb"] + ctc_prob)
+                        else:
+                            total = _log_add(probs["pb"], probs["pnb"])
+                            new_beams[beam + (token_id, )]["pnb"] = _log_add(new_beams[beam + (token_id, )]["pnb"], total + ctc_prob)
+            beams = sorted(new_beams.items(), key=lambda x: _log_add(x[1]["pb"], x[1]["pnb"]), reverse=True)
+            beams = dict(beams[:self.beam_width])
+
+        if not return_beams:
+            best_ids = next(iter(beams))
+            return self._ids_to_text(list(best_ids))
+        else:
+            return [(list(beam), _log_add(probs["pb"], probs["pnb"])) for beam, probs in beams.items()]
+
+                
 
     def beam_search_with_lm(self, logits: torch.Tensor) -> str:
         """
@@ -122,8 +157,45 @@ class Wav2Vec2Decoder:
         """
         if not self.lm_model:
             raise ValueError("KenLM model required for LM shallow fusion")
-        # <YOUR CODE GOES HERE>
-        raise NotImplementedError
+        
+
+        softmax_logits = torch.log_softmax(logits, dim=1)
+        T, _ = softmax_logits.shape
+        beams = {(): {"pb": 0, "pnb": float("-inf"), "lm_score": 0.0}}
+        for t in range(T):
+            
+            ctc_probs = softmax_logits[t].tolist()
+            new_beams = defaultdict(lambda: {"pb": float("-inf"), "pnb": float("-inf"), "lm_score": 0.0})
+            for beam, probs in beams.items():
+                for token_id, ctc_prob in enumerate(ctc_probs):
+
+                    is_repeat = (beam and beam[-1] == token_id)
+                    if token_id == self.blank_token_id:
+                        total = _log_add(probs["pb"], probs["pnb"])
+                        new_beams[beam]["pb"] = _log_add(new_beams[beam]["pb"], total + ctc_prob)
+                        new_beams[beam]["lm_score"] = probs["lm_score"]
+                    else:
+                        if is_repeat:
+                            new_beams[beam]["pnb"] = _log_add(new_beams[beam]["pnb"], probs["pnb"] + ctc_prob)
+                            new_beams[beam + (token_id, )]["pnb"] = _log_add(new_beams[beam + (token_id, )]["pnb"], probs["pb"] + ctc_prob)
+
+                            new_beams[beam]["lm_score"] = probs["lm_score"]
+                            new_beams[beam + (token_id, )]["lm_score"] = probs["lm_score"]
+                        else:
+                            total = _log_add(probs["pb"], probs["pnb"])
+                            new_beams[beam + (token_id, )]["pnb"] = _log_add(new_beams[beam + (token_id, )]["pnb"], total + ctc_prob)
+                            new_beams[beam + (token_id, )]["lm_score"] = probs["lm_score"]
+            
+            for beam, probs in new_beams.items():
+                if beam and self.vocab[beam[-1]] == self.word_delimiter:
+                    lm_text = self._ids_to_text(list(beam)).strip()
+                    probs["lm_score"] = self.lm_model.score(lm_text, bos=True, eos=False) * math.log(10)
+
+            ranked = sorted(new_beams.items(), key=lambda x: _log_add(x[1]["pb"], x[1]["pnb"]) + self.alpha * x[1]["lm_score"] + self.beta * len(self._ids_to_text(list(x[0])).split()), reverse=True)
+            beams = dict(ranked[:self.beam_width])
+            
+        best_ids = next(iter(beams))
+        return self._ids_to_text(list(best_ids))
 
     def lm_rescore(self, beams: List[Tuple[List[int], float]]) -> str:
         """
@@ -138,8 +210,17 @@ class Wav2Vec2Decoder:
         """
         if not self.lm_model:
             raise ValueError("KenLM model required for LM rescoring")
-        # <YOUR CODE GOES HERE>
-        raise NotImplementedError
+        
+        scores = []
+        for beam, am_score in beams:
+            text = self._ids_to_text(beam)
+            lm_score_ln = self.lm_model.score(text, bos=True, eos=False) * math.log(10)
+            score = am_score + self.alpha * lm_score_ln + self.beta * len(text.split())
+            scores.append(score)
+        
+        best_beam_idx = scores.index(max(scores))
+        return self._ids_to_text(beams[best_beam_idx][0])
+
 
     # -----------------------------------------------------------------------
     # Provided — do NOT modify
