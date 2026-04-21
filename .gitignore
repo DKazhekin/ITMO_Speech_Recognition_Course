@@ -26,6 +26,9 @@ ENV/
 *.swo
 *~
 
+# Claude Code per-user project overrides
+.claude/settings.local.json
+
 # Jupyter Notebook checkpoints
 .ipynb_checkpoints/
 
@@ -72,7 +75,9 @@ htmlcov/
 # mypy
 .mypy_cache/
 
-# Data directories (uncomment as needed)
-data/
+# Data directories (raw audio, manifests, cache) — leading slash pins to repo
+# root; also cover per-project data dirs. Does NOT match src/gp1/data/ code.
+/data/
+group-projects/*/data/
 # models/
 # outputs/

@@ -2,8 +2,8 @@
 
 There are two individual homeworks in this course:
 
-1. [Assignment1 - DSP oriented exercise](./assignment1/README.md) [20 pts]
-2. [Assignment2 - ASR decoding oriented exercise](./assignment2/README.md) [20 pts]
+1. [Assignment1 - DSP oriented exercise](./assignments/assignment1/README.md) [20 pts]
+2. [Assignment2 - ASR decoding oriented exercise](./assignments/assignment2/README.md) [20 pts]
 
 
 ### Deadlines

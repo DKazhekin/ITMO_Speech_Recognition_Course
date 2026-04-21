@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "itmo-gp1"
+version = "0.1.0"
+description = "ITMO Speech Recognition GP1 — Russian spoken numbers ASR"
+requires-python = ">=3.11,<3.12"
+readme = "README.md"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gp1"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]

@@ -1,0 +1,12 @@
+{
+  "extraPaths": ["group-projects/gp1/src"],
+  "venvPath": "group-projects/gp1",
+  "venv": ".venv",
+  "pythonVersion": "3.11",
+  "include": [
+    "group-projects/gp1/src",
+    "group-projects/gp1/tests"
+  ],
+  "reportPossiblyUnboundVariable": "none",
+  "reportPrivateImportUsage": "none"
+}
