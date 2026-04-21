@@ -7,8 +7,10 @@ signatures here exactly. Internal helpers are free-form.
 Python 3.11, PEP 604 unions (`X | None`), type annotations on all
 public signatures, immutable dataclasses where possible.
 
-**Last updated:** 2026-04-22 after Wave-1 completion — see §12 for deltas
-between the original spec and the shipped implementation.
+**Last updated:** 2026-04-22 after Phase-2 submit/inference completion — see
+§12 (Wave-1), §13 (Wave-2.1), §14 (Wave-2.2), §15 (Phase-2: inference + bug
+fix + optional-deps install) for deltas between the original spec and the
+shipped implementation.
 
 ---
 
@@ -458,3 +460,104 @@ Wave-1 test counts (pytest):
 | features (melbanks) | 5 |
 | lm (build_corpus + train_kenlm) | 9 |
 | **Total** | **125 (124 fast + 1 slow full-range round-trip)** |
+
+---
+
+## 13. Wave-2.1 implementation notes (2026-04-22)
+
+Wave-2.1 shipped data pipeline, QuartzNet-10x4 encoder, and decoding
+modules. Deltas from the original spec:
+
+| Contract section | Original spec | Shipped reality | Reason |
+|---|---|---|---|
+| §4 `SpokenNumbersDataset` | implicit `torchaudio.load()` | `soundfile.read()` for decoding, `torchaudio.transforms.Resample` for resampling | torchaudio 2.9+ routes `load()` through TorchCodec, which is not installed in the managed `.venv`. `soundfile` is already used by `audio_aug.py`, keeping the dep surface minimal. Public API unchanged. |
+| §4 `DynamicBucketSampler` | no `seed` param | `seed` is an attribute (`sampler._seed = 0` by default, assignable post-init), not a constructor kwarg | Contract never specified `seed`; keeping it as an attribute lets tests mutate without re-constructing, and matches Lhotse dynamic-bucketing idiom. |
+| §4 `leave_n_speakers_out_split` | unspecified | silently drops holdout speaker ids that are not present in `records` (no `ValueError`) | Pipeline may receive partial manifests; silent-pass matches the "no-op if nothing to do" principle. Covered by `test_empty_holdout_yields_all_train`. |
+| §5 `QuartzNet10x4` channels | B1=256, B2=256, B3=512, B4=512, B5=512 (from plan) | B1=256, B2=256, B3=**512**, B4=**512**, B5=**512** — matches original Kriman et al. 2019 sizing | Result: 4,352,371 params (~4.35M, well under the 5M budget). |
+| §5 `QuartzNet10x4` epilogue | implicit plain `Conv1d(k=87)` | `TCSConvBlock(dilation=2)` as epilogue | A plain `Conv1d(384, 512, k=87)` would cost ~17M params alone. TCS-epilogue is the NeMo-standard implementation and matches the paper. |
+| §5 Intermediate tap for InterCTC | "≈ 0.5 depth" | tap after B2 (2/5 of the blocks = 0.4 depth) | Closest practical tap point at integer block boundaries. |
+
+Wave-2.1 test counts (pytest):
+
+| Suite | Count |
+|---|---|
+| data (manifest + dataset + collate) | 44 |
+| models (quartznet + shapes) | 13 |
+| decoding (greedy) | 5 |
+| decoding (lm) | 1 skipped (kenlm optional C-ext not installed) |
+| decoding (beam_pyctc) | 1 skipped (pyctcdecode not installed) |
+| **Wave-2.1 subtotal** | **62 passed + 2 skipped** |
+| **Repository total** | **186 passed + 2 skipped + 1 deselected (slow)** |
+
+**Known optional dependencies** (skip-gate in tests, install for Phase 2):
+
+- `pyctcdecode>=0.5.0` — pure-Python, `uv pip install pyctcdecode`
+- `kenlm` — C-extension, build via `pip install https://github.com/kpu/kenlm/archive/master.zip` (needs boost headers) or `pip install kenlm-wheels`
+- `librosa`, `jiwer`, `pyyaml`, `tqdm`, `wandb` — NOT required by tests (Wave-2.2 hand-rolls CER, optional `wandb_run` Protocol); install before real training runs
+- `torchcodec` — NOT required; `soundfile` path is canonical in `dataset.py`
+
+---
+
+## 14. Wave-2.2 implementation notes (2026-04-22)
+
+Wave-2.2 shipped training infrastructure (`src/gp1/train/`): metrics,
+optimizers, schedulers, Trainer. Deltas from the original spec:
+
+| Contract section | Original spec | Shipped reality | Reason |
+|---|---|---|---|
+| §8 `TrainerConfig.ckpt_dir` | `Path = Path("checkpoints")` | `Path = field(default_factory=lambda: Path("checkpoints"))` | Python dataclass forbids mutable defaults (even though `Path` is hashable, the linter and Python runtime complain on re-declaration). `field(default_factory=...)` is the idiomatic fix. Public name/type/effective value unchanged. |
+| §8 `compute_cer` corpus weighting | unspecified | sum-of-char-distances / sum-of-reference-lengths (NOT mean of per-sample CERs) | Matches `jiwer` convention and Kaggle-style weighted CER. Empty ref → contributes 0 to both numerator and denominator. |
+| §8 CTC fp32 island | "fp32 internally" (prose) | inside `Trainer.fit()`, forward runs under `torch.autocast(device_type, dtype=torch.float16)` when `fp16_autocast=True`, then `torch.autocast(..., enabled=False)` wraps `log_probs.float()` → `ctc_loss(...)` | Canonical NeMo / fairseq pattern. Verified by `test_trainer_uses_fp32_for_ctc_loss_even_when_fp16_autocast_true`. |
+| §8 NovoGrad | "hand-roll per Ginsburg et al. 2019" | hand-rolled in `src/gp1/train/optim.py` with decoupled weight decay | `torch.optim` does not ship NovoGrad; `torch_optimizer` pkg not installed. Decoupled WD is the defining property (WD applied to params, not added to gradient). |
+
+Wave-2.2 test counts:
+
+| Suite | Count |
+|---|---|
+| metrics (CER + per-speaker CER) | 12 |
+| optim (NovoGrad + AdamW) | 5 |
+| schedulers (Noam + CosineWarmup) | 9 |
+| trainer (fit loop + autocast + ckpt + early-stop + grad-accum) | 7 |
+| **Wave-2.2 subtotal** | **33** |
+
+**Repository totals after Wave-2.2:**
+
+```
+.venv/bin/python -m pytest tests/ -m "not slow" --no-header -q
+=> 219 passed, 2 skipped, 1 deselected, 1 warning in ~46s
+```
+
+The single warning is from `test_trainer_calls_grad_accum_correctly` where the test monkey-patches `optimizer.step()` — benign under mocking, no production impact.
+
+**Remaining scope for Phase 2 (first Kaggle submit):**
+
+- `src/gp1/submit/inference.py` — `run_inference()` (§10) — greedy first, then beam
+- Install `pyctcdecode` + `kenlm` + `jiwer` before training runs
+- Training recipe: config → Trainer → checkpoint → inference on test manifest
+- Target: public CER < 1.7 by 2026-04-25
+
+---
+
+## 15. Phase-2 implementation notes (2026-04-22)
+
+Phase-2 shipped `src/gp1/submit/inference.py` and installed the remaining
+optional-dep stack. Deltas and post-install fixes:
+
+| Area | Change | Reason |
+|---|---|---|
+| §10 `run_inference` filename | uses `record.audio_path.name` (with extension) | Kaggle submission convention; pinned by `test_run_inference_filename_is_audio_path_name` |
+| §10 `torch.load` | explicit `weights_only=False` | PyTorch 2.11 flipped default to `True` in 2.6; our checkpoint embeds `TrainerConfig` which is not in the safe-globals list |
+| §10 YAML parsing | PyYAML lazy import + hand-rolled fallback for the GP1 config subset | avoids hard dep on `yaml` in the test path |
+| §10 Beam decoder wiring | `_try_build_beam_decoder()` returns `None` on any import / build error; caller falls back to greedy | graceful degradation when `pyctcdecode` or `kenlm` is missing at runtime |
+| §7 `BeamSearchDecoder` **bug fix** | `pyctcdecode.build_ctcdecoder` kwarg renamed from `kenlm_model` → `kenlm_model_path` | pyctcdecode 0.5.0 API; the agent got the signature from stale reference code. Verified fix: all 4 `test_beam_pyctc.py` tests pass once pyctcdecode is actually installed. |
+
+**Optional deps installed into `.venv` via `uv pip`:** `pyctcdecode 0.5.0`, `jiwer 4.0.0`, `pyyaml 6.0.3`, `tqdm 4.67.3`, `librosa 0.11.0`. **Not yet installed:** `kenlm` (needs boost headers; single remaining `test_lm.py` skip-gate), `wandb` (optional at training time). Note: `librosa` pulled numpy back to `1.26.4` for compat — no tests affected.
+
+**Repo totals after Phase-2 + fix + deps:**
+
+```
+.venv/bin/python -m pytest tests/ -m "not slow" --no-header -q
+=> 231 passed, 1 skipped (kenlm), 1 deselected (slow), 1 warning in ~53s
+```
+
+**Ready for training:** all modules (§1-§10) implemented, tested, and wired. Remaining work is orchestration: YAML config → dataset ingestion → training loop → checkpoint → inference → submission.csv. No more agent waves needed for Phase-2.
