@@ -170,7 +170,18 @@ class Trainer:
               "best_val_cer" (float) — best validation CER achieved.
               "best_ckpt_path" (Path) — path to the best checkpoint file.
         """
-        for epoch in range(1, self.config.max_epochs + 1):
+        try:
+            from tqdm.auto import tqdm as _tqdm
+
+            epoch_iter = _tqdm(
+                range(1, self.config.max_epochs + 1),
+                desc="epochs",
+                dynamic_ncols=True,
+            )
+        except ImportError:
+            epoch_iter = range(1, self.config.max_epochs + 1)
+
+        for epoch in epoch_iter:
             self._train_epoch(epoch)
 
             if epoch % self.config.val_every_n_epochs == 0:
@@ -225,7 +236,21 @@ class Trainer:
         self.model.train()
         self.optimizer.zero_grad()
 
-        for micro_idx, batch in enumerate(self.train_loader):
+        try:
+            from tqdm.auto import tqdm as _tqdm
+
+            loader_iter = enumerate(
+                _tqdm(
+                    self.train_loader,
+                    desc=f"epoch {epoch} train",
+                    leave=False,
+                    dynamic_ncols=True,
+                )
+            )
+        except ImportError:
+            loader_iter = enumerate(self.train_loader)
+
+        for micro_idx, batch in loader_iter:
             loss = self._forward_batch(batch)
 
             # Scale loss for gradient accumulation
