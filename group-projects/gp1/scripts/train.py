@@ -70,8 +70,32 @@ log = logging.getLogger("gp1.train")
 
 
 def _load_config(path: Path) -> dict[str, Any]:
+    """Load YAML config and recursively resolve `defaults: [name, ...]` inheritance.
+
+    Each name under `defaults` is resolved as `<path.parent>/<name>.yaml` and
+    merged in order: the parent (defaults) is loaded first, then the current
+    file's top-level keys override. Dict values are merged one level deep; other
+    types are replaced wholesale.
+    """
     with open(path, encoding="utf-8") as fh:
-        return yaml.safe_load(fh)
+        cfg = yaml.safe_load(fh) or {}
+    defaults = cfg.pop("defaults", None)
+    if not defaults:
+        return cfg
+    merged: dict[str, Any] = {}
+    for name in defaults:
+        parent = _load_config(path.parent / f"{name}.yaml")
+        for k, v in parent.items():
+            if isinstance(v, dict) and isinstance(merged.get(k), dict):
+                merged[k] = {**merged[k], **v}
+            else:
+                merged[k] = v
+    for k, v in cfg.items():
+        if isinstance(v, dict) and isinstance(merged.get(k), dict):
+            merged[k] = {**merged[k], **v}
+        else:
+            merged[k] = v
+    return merged
 
 
 def _resolve_manifest(
