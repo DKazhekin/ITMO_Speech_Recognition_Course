@@ -16,6 +16,7 @@ References:
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import soundfile as sf
 import torch
@@ -26,6 +27,30 @@ from gp1.text.normalize import digits_to_words
 from gp1.text.vocab import CharVocab
 from gp1.text.vocab_word import WordVocab
 from gp1.types import ManifestRecord
+
+if TYPE_CHECKING:
+    # BPEVocab is an optional dep (sentencepiece); import only for type-checking.
+    from gp1.text.vocab_bpe import BPEVocab
+
+
+@runtime_checkable
+class VocabProtocol(Protocol):
+    """Structural interface required by SpokenNumbersDataset.
+
+    Any vocabulary object must expose:
+    - ``encode(text: str) -> list[int]``   — text to token ids
+    - ``vocab_size: int``                  — total vocabulary size
+    - ``blank_id: int``                    — CTC blank token id (always 0)
+    """
+
+    def encode(self, text: str) -> list[int]: ...
+
+    @property
+    def vocab_size(self) -> int: ...
+
+    @property
+    def blank_id(self) -> int: ...
+
 
 log = logging.getLogger(__name__)
 
@@ -39,7 +64,10 @@ class SpokenNumbersDataset(torch.utils.data.Dataset):
 
     Args:
         records: Ordered list of ManifestRecord objects.
-        vocab: CharVocab instance for encoding transcriptions.
+        vocab: Vocabulary for encoding transcriptions.  Accepts any object
+            satisfying ``VocabProtocol`` (``CharVocab``, ``BPEVocab``, or
+            ``WordVocab``).  Duck-typed at runtime; the annotation broadens the
+            formerly ``CharVocab``-only hint to reflect actual usage.
         target_samplerate: All audio is resampled to this rate (Hz).
         augmenter: Optional AudioAugmenter applied in ``__getitem__``.
         return_two_views: When True, also returns ``audio_view2`` produced
@@ -52,7 +80,7 @@ class SpokenNumbersDataset(torch.utils.data.Dataset):
     def __init__(
         self,
         records: list[ManifestRecord],
-        vocab: CharVocab,
+        vocab: "CharVocab | BPEVocab | VocabProtocol",
         target_samplerate: int = 16000,
         augmenter: AudioAugmenter | None = None,
         return_two_views: bool = False,

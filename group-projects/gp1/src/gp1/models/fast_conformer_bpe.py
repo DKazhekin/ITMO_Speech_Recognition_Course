@@ -28,7 +28,7 @@ Hyperparameter choices for ~4.2M params
     ff_ratio     = 4
     conv_kernel  = 9       (odd, shorter than Conformer default 31 — faster)
     dropout      = 0.1
-    vocab_size   = 256     (BPE-256)
+    vocab_size   = 257     (BPE-256 + 1 blank via BPEVocab id-shift)
 
 Approximate param breakdown:
     SubsampleConv(80→96, factor=4)  : ~0.30M
@@ -149,6 +149,13 @@ class FastConformerBPE(nn.Module):
         self.head = nn.Linear(d_model, vocab_size)
 
         n_params = sum(p.numel() for p in self.parameters())
+        _PARAM_BUDGET = 5_000_000
+        if n_params > _PARAM_BUDGET:
+            raise ValueError(
+                f"FastConformerBPE exceeds 5M param budget: "
+                f"{n_params / 1e6:.2f}M > {_PARAM_BUDGET / 1e6:.1f}M. "
+                f"Reduce d_model or n_blocks."
+            )
         log.info(
             "FastConformerBPE initialised: d_model=%d, n_blocks=%d, "
             "vocab_size=%d, subsample_factor=%d, params=%d",
@@ -173,7 +180,7 @@ class FastConformerBPE(nn.Module):
         -------
         EncoderOutput
             ``log_probs``      : ``[B, T', V]`` float32
-            ``output_lengths`` : ``[B]`` int64, T' = T // subsample_factor
+            ``output_lengths`` : ``[B]`` int64, T' = ceil(ceil(T/2)/2) (two ceil-div passes)
             ``intermediate``   : ``None`` (no InterCTC tap for this encoder)
         """
         if mel.dim() != 3:
@@ -194,8 +201,11 @@ class FastConformerBPE(nn.Module):
         logits = self.head(x).float()  # [B, T', V] float32
         log_probs = F.log_softmax(logits, dim=-1)
 
-        # Subsampled lengths (floor division by stride product).
-        output_lengths = (mel_lengths // self.subsample_factor).to(torch.long)
+        # Subsampled lengths: SubsampleConv uses two stride-2 stages internally,
+        # each producing ceil(T/2) frames. Apply ceil-div twice (H5 fix).
+        # ceil(T/2) = (T + 1) // 2; apply twice for factor=4.
+        lengths_stage1 = (mel_lengths + 1) // 2
+        output_lengths = ((lengths_stage1 + 1) // 2).to(torch.long)
 
         return EncoderOutput(
             log_probs=log_probs,

@@ -16,6 +16,7 @@ class ManifestRecord:
     gender: str  # "male" | "female"
     ext: str  # "wav" | "mp3"
     samplerate: int  # native sample rate (will be resampled to 16 kHz)
+    duration_s: float = 0.0  # audio duration in seconds (frames / samplerate)
 
 
 @dataclass

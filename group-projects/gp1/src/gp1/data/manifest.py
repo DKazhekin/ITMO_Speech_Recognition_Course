@@ -28,6 +28,7 @@ log = logging.getLogger(__name__)
 # Public API
 # ---------------------------------------------------------------------------
 
+
 # TODO: как будто избыточный код, зачем создавать промежуточный манифест, если он все равно попадает в JSONL в виде словаря ?
 def build_manifest(csv_path: Path, audio_root: Path, out_path: Path) -> int:
     """Build a JSONL manifest from a Kaggle-style CSV.
@@ -61,6 +62,7 @@ def build_manifest(csv_path: Path, audio_root: Path, out_path: Path) -> int:
 
             info = sf.info(str(audio_path))
             samplerate: int = info.samplerate
+            duration_s: float = info.frames / info.samplerate
 
             record = ManifestRecord(
                 audio_path=audio_path,
@@ -69,6 +71,7 @@ def build_manifest(csv_path: Path, audio_root: Path, out_path: Path) -> int:
                 gender=row["gender"],
                 ext=ext,
                 samplerate=samplerate,
+                duration_s=duration_s,
             )
             records.append(record)
 
@@ -99,6 +102,7 @@ def write_jsonl(records: list[ManifestRecord], path: Path) -> None:
                 "gender": record.gender,
                 "ext": record.ext,
                 "samplerate": record.samplerate,
+                "duration_s": record.duration_s,
             }
             fh.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
@@ -123,6 +127,9 @@ def read_jsonl(path: Path) -> list[ManifestRecord]:
             if not line:
                 continue
             obj = json.loads(line)
+            # duration_s may be absent in old JSONL files; fall back gracefully
+            # to a conservative 2-second estimate matching the old train.py behaviour.
+            raw_duration = obj.get("duration_s", 2.0)
             record = ManifestRecord(
                 audio_path=Path(obj["audio_path"]),
                 transcription=obj["transcription"],
@@ -130,6 +137,7 @@ def read_jsonl(path: Path) -> list[ManifestRecord]:
                 gender=obj["gender"],
                 ext=obj["ext"],
                 samplerate=int(obj["samplerate"]),
+                duration_s=float(raw_duration),
             )
             records.append(record)
 

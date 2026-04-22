@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import sys
 from pathlib import Path
 from typing import Any
@@ -34,13 +35,14 @@ if str(_REPO_SRC) not in sys.path:
     sys.path.insert(0, str(_REPO_SRC))
 
 import torch
-import yaml
 from torch.utils.data import DataLoader
 
+from gp1.config import load_config as _load_config
 from gp1.data.audio_aug import AudioAugmenter
 from gp1.data.collate import DynamicBucketSampler, collate_fn
 from gp1.data.dataset import SpokenNumbersDataset
 from gp1.data.manifest import ManifestRecord, build_manifest, read_jsonl
+from gp1.data.spec_aug import SpecAugmenter
 from gp1.losses.cr_ctc import CRCTCLoss
 from gp1.losses.ctc import CTCLoss
 from gp1.losses.inter_ctc import InterCTCHead
@@ -67,35 +69,6 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s"
 )
 log = logging.getLogger("gp1.train")
-
-
-def _load_config(path: Path) -> dict[str, Any]:
-    """Load YAML config and recursively resolve `defaults: [name, ...]` inheritance.
-
-    Each name under `defaults` is resolved as `<path.parent>/<name>.yaml` and
-    merged in order: the parent (defaults) is loaded first, then the current
-    file's top-level keys override. Dict values are merged one level deep; other
-    types are replaced wholesale.
-    """
-    with open(path, encoding="utf-8") as fh:
-        cfg = yaml.safe_load(fh) or {}
-    defaults = cfg.pop("defaults", None)
-    if not defaults:
-        return cfg
-    merged: dict[str, Any] = {}
-    for name in defaults:
-        parent = _load_config(path.parent / f"{name}.yaml")
-        for k, v in parent.items():
-            if isinstance(v, dict) and isinstance(merged.get(k), dict):
-                merged[k] = {**merged[k], **v}
-            else:
-                merged[k] = v
-    for k, v in cfg.items():
-        if isinstance(v, dict) and isinstance(merged.get(k), dict):
-            merged[k] = {**merged[k], **v}
-        else:
-            merged[k] = v
-    return merged
 
 
 def _resolve_manifest(
@@ -126,11 +99,35 @@ def _build_aug_config(cfg_aug: dict[str, Any], seed: int | None) -> AugConfig:
         "noise_prob",
         "noise_snr_db_range",
         "rir_prob",
+        # H1: specaug parameters were previously filtered out; include them now.
+        "specaug_freq_mask_param",
+        "specaug_num_freq_masks",
+        "specaug_time_mask_param",
+        "specaug_num_time_masks",
+        "specaug_time_mask_max_ratio",
     }
     kwargs = {k: v for k, v in (cfg_aug or {}).items() if k in allowed}
     if "speed_factors" in kwargs and isinstance(kwargs["speed_factors"], list):
         kwargs["speed_factors"] = tuple(kwargs["speed_factors"])
     return AugConfig(seed=seed, **kwargs)
+
+
+def _build_spec_augmenter(aug_config: AugConfig) -> SpecAugmenter | None:
+    """Build a SpecAugmenter from the resolved AugConfig, or None if all masks are 0."""
+    # Only instantiate when at least one masking dimension is active.
+    if (
+        aug_config.specaug_num_freq_masks == 0
+        and aug_config.specaug_num_time_masks == 0
+    ):
+        return None
+    return SpecAugmenter(
+        freq_mask_param=aug_config.specaug_freq_mask_param,
+        num_freq_masks=aug_config.specaug_num_freq_masks,
+        time_mask_param=aug_config.specaug_time_mask_param,
+        num_time_masks=aug_config.specaug_num_time_masks,
+        time_mask_max_ratio=aug_config.specaug_time_mask_max_ratio,
+        seed=aug_config.seed,
+    )
 
 
 def _build_vocab(cfg: dict[str, Any], config_path: Path) -> CharVocab | Any:
@@ -373,6 +370,8 @@ def main() -> int:
     vocab = _build_vocab(cfg, args.config)
     aug_config = _build_aug_config(cfg.get("aug", {}), seed=args.seed)
     augmenter = AudioAugmenter(aug_config)
+    # H1: build SpecAugmenter from the resolved aug config.
+    spec_augmenter = _build_spec_augmenter(aug_config)
 
     word_aux_cfg = cfg.get("word_aux") or {}
     word_aux_enabled = bool(word_aux_cfg.get("enabled", False))
@@ -401,10 +400,12 @@ def main() -> int:
     )
 
     data_cfg = cfg.get("data", {})
+    # H2: use real audio durations instead of a fixed 2-second proxy.
+    _target_sr: int = int(cfg.get("audio", {}).get("samplerate", 16000))
     train_loader = _build_dataloader(
         train_ds,
         batch_size=data_cfg.get("train_batch_size"),
-        sample_lengths=[int(r.samplerate * 2.0) for r in train_records],
+        sample_lengths=[int(r.duration_s * _target_sr) for r in train_records],
         max_tokens_per_batch=data_cfg.get("max_tokens_per_batch"),
         num_buckets=int(data_cfg.get("num_buckets", 20)),
         shuffle=True,
@@ -471,6 +472,12 @@ def main() -> int:
     )
     log.info("Training on device: %s", device)
 
+    # H4: read grad_clip_norm from config (may be absent in old configs → None).
+    _raw_grad_clip = train_cfg.get("grad_clip_norm")
+    _grad_clip_norm: float | None = (
+        float(_raw_grad_clip) if _raw_grad_clip is not None else None
+    )
+
     trainer_config = TrainerConfig(
         max_epochs=max_epochs,
         grad_accum=int(train_cfg.get("grad_accum", 1)),
@@ -481,6 +488,7 @@ def main() -> int:
         early_stop_patience=int(train_cfg.get("early_stop_patience", 15)),
         early_stop_metric=str(train_cfg.get("early_stop_metric", "max_speaker_cer")),
         ckpt_dir=args.output_dir / "checkpoints",
+        grad_clip_norm=_grad_clip_norm,
     )
 
     wandb_run = None
@@ -517,6 +525,8 @@ def main() -> int:
         config=trainer_config,
         device=device,
         wandb_run=wandb_run,
+        audio_cfg=cfg.get("audio", {}),  # H8: wire audio config to LogMelFilterBanks
+        spec_augmenter=spec_augmenter,  # H1: apply SpecAugment during training
     )
 
     result = trainer.fit()
@@ -526,11 +536,20 @@ def main() -> int:
         result["best_ckpt_path"],
     )
 
+    # RFC 8259 §6: JSON does not allow Infinity or NaN.  Represent an
+    # "never-improved" CER (float("inf") initial sentinel) as JSON null so
+    # that result.json is always valid standard JSON.  Downstream readers
+    # (export.py, publish_release.sh) must treat null as "no CER available".
+    _raw_cer = float(result["best_val_cer"])
+    _cer_for_json: float | None = (
+        None if (math.isinf(_raw_cer) or math.isnan(_raw_cer)) else _raw_cer
+    )
+
     summary_path = args.output_dir / "result.json"
     summary_path.write_text(
         json.dumps(
             {
-                "best_val_cer": float(result["best_val_cer"]),
+                "best_val_cer": _cer_for_json,
                 "best_ckpt_path": str(result["best_ckpt_path"]),
                 "config_path": str(args.config),
                 "n_params": n_params,

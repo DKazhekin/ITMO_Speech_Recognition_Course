@@ -28,6 +28,8 @@ import numpy as np
 import soundfile as sf
 import yaml
 
+from gp1.config import load_config as _gp1_load_config
+
 ROOT = Path(__file__).resolve().parents[1]
 _REPO_SRC = ROOT / "src"
 if str(_REPO_SRC) not in sys.path:
@@ -80,29 +82,14 @@ def _write_csv(csv_path: Path, wav_dir: Path, n: int, seed: int) -> list[str]:
 
 
 def _patch_config(config_path: Path, out_path: Path) -> Path:
-    """Load a config, flatten its `defaults: [base]` into a single dict, and
+    """Load a config, flatten its ``defaults:`` inheritance, and
     override training knobs for a fast smoke run.
-    """
-    with open(config_path, encoding="utf-8") as fh:
-        cfg = yaml.safe_load(fh)
 
-    # Resolve `defaults: [base]` manually (the script does this too).
-    if "defaults" in cfg:
-        defaults = cfg.pop("defaults")
-        for name in defaults:
-            base_path = config_path.parent / f"{name}.yaml"
-            with open(base_path, encoding="utf-8") as fh:
-                base_cfg = yaml.safe_load(fh)
-            # Merge: base first, then override with cfg
-            merged: dict = {}
-            for key, val in base_cfg.items():
-                merged[key] = val
-            for key, val in cfg.items():
-                if isinstance(val, dict) and isinstance(merged.get(key), dict):
-                    merged[key] = {**merged[key], **val}
-                else:
-                    merged[key] = val
-            cfg = merged
+    Delegates YAML defaults resolution to ``gp1.config.load_config``
+    (the single source of truth — mirrors ``scripts/train.py`` semantics).
+    """
+    # Resolve `defaults:` inheritance via the shared helper.
+    cfg = _gp1_load_config(config_path)
 
     # Override training knobs for a fast run.
     cfg.setdefault("train", {})

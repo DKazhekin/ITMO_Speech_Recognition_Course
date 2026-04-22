@@ -289,7 +289,7 @@ class CRDNN(nn.Module):
         -------
         EncoderOutput
             ``log_probs``      : ``[B, T', V]`` float32
-            ``output_lengths`` : ``[B]`` int64, T' = T // subsample_factor
+            ``output_lengths`` : ``[B]`` int64, T' = ceil(T / subsample_factor)
             ``intermediate``   : ``None`` (CRDNN has no InterCTC tap)
         """
         if mel.dim() != 3:
@@ -307,7 +307,10 @@ class CRDNN(nn.Module):
         logits = self.head(x).float()  # [B, T', vocab_size] float32
         log_probs = F.log_softmax(logits, dim=-1)  # [B, T', V] float32
 
-        output_lengths = (mel_lengths // self.subsample_factor).to(torch.long)
+        # Ceil-div: strided conv with stride=s produces ceil(T/s) frames (H5 fix).
+        output_lengths = (
+            (mel_lengths + self.subsample_factor - 1) // self.subsample_factor
+        ).to(torch.long)
 
         return EncoderOutput(
             log_probs=log_probs,

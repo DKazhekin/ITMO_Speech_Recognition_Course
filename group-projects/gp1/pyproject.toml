@@ -8,6 +8,28 @@ version = "0.1.0"
 description = "ITMO Speech Recognition GP1 — Russian spoken numbers ASR"
 requires-python = ">=3.11,<3.12"
 readme = "README.md"
+dependencies = [
+    "torch==2.5.1",
+    "torchaudio==2.5.1",
+    "num2words>=0.5.13",
+    "pyctcdecode>=0.5.0",
+    "jiwer>=3.0.4",
+    "pyyaml>=6.0.2",
+    "soundfile>=0.12.1",
+    "tqdm>=4.66.0",
+    "wandb>=0.18.0",
+]
+
+[project.optional-dependencies]
+bpe = ["sentencepiece>=0.2.0"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-cov>=5.0.0",
+    "nbformat>=5.10.0",
+    "ipykernel>=6.29.0",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/gp1"]

@@ -215,6 +215,7 @@ def _load_model(
     checkpoint_path: Path,
     cfg: dict[str, Any],
     device: torch.device,
+    vocab_size: int | None = None,
 ) -> nn.Module:
     """Instantiate a model from config and load weights from checkpoint.
 
@@ -229,6 +230,21 @@ def _load_model(
 
     Raises ``ValueError`` for unknown names.
 
+    Parameters
+    ----------
+    checkpoint_path:
+        Path to ``.pt`` checkpoint saved by ``Trainer``.
+    cfg:
+        Full config dict (parsed from YAML).
+    device:
+        Target device for the model.
+    vocab_size:
+        When provided, overrides ``cfg["model"]["vocab_size"]``.  Pass
+        ``vocab.vocab_size`` here to avoid the off-by-one drift between the
+        YAML value (SP piece count) and the actual head size used at training
+        time (SP piece count + 1 blank).  When absent, falls back to the
+        config value for backward compatibility with char-vocab models.
+
     Notes
     -----
     ``weights_only=False`` is used because training checkpoints may embed
@@ -239,7 +255,24 @@ def _load_model(
     """
     model_cfg = cfg.get("model", {}) or {}
     model_name: str = str(model_cfg.get("name", "quartznet_10x4"))
-    vocab_size: int = int(model_cfg.get("vocab_size", CharVocab.vocab_size))
+
+    # vocab_size resolution: kwarg (from vocab object) takes priority over cfg.
+    # The kwarg path is the C2 fix: BPE config says 256 but the checkpoint head
+    # was built with BPEVocab.vocab_size = 257 (sp.get_piece_size() + 1).
+    if vocab_size is None:
+        cfg_vocab_size = int(model_cfg.get("vocab_size", CharVocab.vocab_size))
+        vocab_size = cfg_vocab_size
+    else:
+        cfg_vocab_size = int(model_cfg.get("vocab_size", CharVocab.vocab_size))
+        if cfg_vocab_size != vocab_size:
+            log.warning(
+                "vocab_size from config (%d) differs from vocab object (%d); "
+                "using vocab object value. This is expected for BPE models where "
+                "the YAML stores SP piece count but the checkpoint head includes "
+                "an extra blank token.",
+                cfg_vocab_size,
+                vocab_size,
+            )
 
     model: nn.Module
     if model_name == "quartznet_10x4":
@@ -477,7 +510,13 @@ def _try_build_beam_decoder(
     vocab: CharVocab,
     lm_binary_path: Path,
 ) -> Any | None:
-    """Attempt to build a BeamSearchDecoder.  Returns None if deps missing."""
+    """Attempt to build a BeamSearchDecoder.  Returns None if deps missing.
+
+    Only ``ImportError`` (pyctcdecode / kenlm not installed) and
+    ``FileNotFoundError`` (LM binary path does not exist) are treated as
+    expected missing-dependency conditions and silenced.  Any other exception
+    indicates a real programming bug and is re-raised so it surfaces clearly.
+    """
     try:
         from gp1.decoding.beam_pyctc import BeamSearchConfig, BeamSearchDecoder
         from gp1.text.vocab_word import NUMBER_WORDS
@@ -492,7 +531,7 @@ def _try_build_beam_decoder(
         )
         log.info("Beam search decoder initialised with LM: %s", lm_binary_path)
         return decoder
-    except Exception as exc:
+    except (ImportError, FileNotFoundError) as exc:
         log.warning(
             "Beam search decoder unavailable (lm=%s), falling back to greedy: %s",
             lm_binary_path,
@@ -549,18 +588,27 @@ def run_inference(
 
     device = torch.device(config.device)
 
-    # -- Load config and model ------------------------------------------------
+    # -- Load config ----------------------------------------------------------
     cfg = _load_yaml(config.config_path)
-    model = _load_model(config.checkpoint_path, cfg, device)
+
+    # -- Build vocabulary FIRST (C2 fix) --------------------------------------
+    # vocab.vocab_size is the single source of truth for the model head size.
+    # For BPE, BPEVocab.vocab_size = sp.get_piece_size() + 1, which is one
+    # more than the raw YAML value (which stores the SP piece count).
+    # Building vocab before _load_model lets us pass the correct vocab_size
+    # into the model constructor, preventing load_state_dict shape mismatches.
+    vocab = _build_vocab(cfg, config.config_path)
+
+    # -- Load model (C2 fix: pass vocab_size from vocab object) ---------------
+    model = _load_model(
+        config.checkpoint_path, cfg, device, vocab_size=vocab.vocab_size
+    )
 
     # -- Build mel frontend ---------------------------------------------------
     audio_cfg: dict[str, Any] = cfg.get("audio", {}) or {}
     frontend = LogMelFilterBanks(**audio_cfg).to(device)
     frontend.eval()
     hop_length: int = int(audio_cfg.get("hop_length", 160))
-
-    # -- Vocabulary and decoder -----------------------------------------------
-    vocab = _build_vocab(cfg, config.config_path)
 
     beam_decoder = None
     if config.lm_binary_path is not None:
@@ -627,13 +675,16 @@ def _words_to_digits_safe(text: str) -> str:
     """Convert Russian number words to a digit string, returning '' on failure.
 
     ``words_to_digits`` raises ``ValueError`` on malformed input (e.g. blank
-    output from greedy CTC).  We catch that here so one bad sample does not
-    abort the entire inference pass.
+    output from greedy CTC, unknown vocabulary token).  We catch only that
+    exception here so one bad sample does not abort the entire inference pass.
+
+    Any other exception type (``AttributeError``, ``ImportError``, etc.)
+    indicates a real bug and must propagate to the caller.
     """
     if not text or not text.strip():
         return ""
     try:
         return words_to_digits(text.strip())
-    except (ValueError, KeyError, Exception) as exc:
+    except ValueError as exc:
         log.debug("words_to_digits failed for %r: %s", text, exc)
         return ""

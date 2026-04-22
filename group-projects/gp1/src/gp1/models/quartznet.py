@@ -183,7 +183,7 @@ class QuartzNet10x4(nn.Module):
         -------
         EncoderOutput
             ``log_probs``      : ``[B, T', V]`` float32
-            ``output_lengths`` : ``[B]`` int64, T' = T // 2
+            ``output_lengths`` : ``[B]`` int64, T' = ceil(T / 2) = (T + 1) // 2
             ``intermediate``   : ``[B, T', 256]`` float32 (after block2)
         """
         if mel.dim() != 3:
@@ -213,8 +213,12 @@ class QuartzNet10x4(nn.Module):
         # log-softmax along vocab dimension, then transpose to [B, T', V]
         log_probs = torch.nn.functional.log_softmax(x, dim=1).transpose(1, 2)
 
-        # Compute subsampled lengths (integer floor division by stride=2).
-        output_lengths = (mel_lengths // self.subsample_factor).to(torch.long)
+        # Compute subsampled lengths using ceil-div to match strided conv output:
+        # Conv1d with stride=s produces ceil(T/s) frames, not floor(T/s).
+        # ceil(T/s) = (T + s - 1) // s  (H5 fix).
+        output_lengths = (
+            (mel_lengths + self.subsample_factor - 1) // self.subsample_factor
+        ).to(torch.long)
 
         return EncoderOutput(
             log_probs=log_probs,

@@ -284,8 +284,12 @@ class EfficientConformer(nn.Module):
         logits = self.head(x).float()  # [B, T/4, V] fp32
         log_probs = F.log_softmax(logits, dim=-1)  # [B, T/4, V] fp32
 
-        # ---- Output lengths (integer floor division) ----------------------
-        output_lengths = (mel_lengths // self.subsample_factor).to(torch.long)
+        # ---- Output lengths: progressive ceil-div for two stride-2 stages --
+        # Prologue uses stride=2:  T_1 = ceil(T   / 2) = (T   + 1) // 2
+        # DownsampleBlock stride=2: T'  = ceil(T_1 / 2) = (T_1 + 1) // 2
+        # This matches actual Conv1d output shape for odd T (H5 fix).
+        lengths_after_prologue = (mel_lengths + 1) // 2
+        output_lengths = ((lengths_after_prologue + 1) // 2).to(torch.long)
 
         return EncoderOutput(
             log_probs=log_probs,

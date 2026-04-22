@@ -20,8 +20,6 @@ from gp1.text.vocab import CharVocab
 
 log = logging.getLogger(__name__)
 
-BLANK_ID: int = 0
-
 
 def greedy_decode(
     log_probs: torch.Tensor,

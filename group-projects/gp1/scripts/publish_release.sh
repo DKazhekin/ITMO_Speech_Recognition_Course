@@ -93,11 +93,13 @@ done
 RELEASE_JSON="${RELEASE_DIR}/release.json"
 
 if command -v jq &>/dev/null; then
+    # jq -r emits "null" (literal string) when the JSON value is null.
     BEST_CER=$(jq -r '.best_val_cer' "${RELEASE_JSON}")
     PARAMS_COUNT=$(jq -r '.params_count' "${RELEASE_JSON}")
     GIT_COMMIT_META=$(jq -r '.git_commit' "${RELEASE_JSON}")
 else
     echo "WARN: jq not found — falling back to grep/sed for metadata extraction" >&2
+    # Match only numeric values; null produces an empty string.
     BEST_CER=$(grep -o '"best_val_cer"[[:space:]]*:[[:space:]]*[0-9.e+-]*' "${RELEASE_JSON}" \
         | sed 's/.*:[[:space:]]*//')
     PARAMS_COUNT=$(grep -o '"params_count"[[:space:]]*:[[:space:]]*[0-9]*' "${RELEASE_JSON}" \
@@ -111,7 +113,17 @@ fi
 # ---------------------------------------------------------------------------
 
 GIT_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-RELEASE_TITLE="GP1 ${BASELINE} ${TAG} — CER ${BEST_CER} (${PARAMS_COUNT} params)"
+
+# Build the CER segment only when best_val_cer is a real number.
+# jq -r emits "null" for JSON null; grep/sed fallback yields "" for null.
+# Both cases must produce a title without a CER segment.
+if [[ -n "${BEST_CER}" && "${BEST_CER}" != "null" ]]; then
+    CER_SEGMENT=" — CER ${BEST_CER}"
+else
+    CER_SEGMENT=""
+fi
+
+RELEASE_TITLE="GP1 ${BASELINE} ${TAG}${CER_SEGMENT} (${PARAMS_COUNT} params)"
 NOTES_FILE="${RELEASE_DIR}/README.md"
 
 if [[ ! -f "${NOTES_FILE}" ]]; then

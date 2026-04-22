@@ -1,6 +1,6 @@
 """Text denormalization: Russian number words to digit strings.
 
-Contract (CONTRACTS.md §2): deterministic reducer over closed 30-word vocabulary.
+Contract (CONTRACTS.md §2): deterministic reducer over closed 42-word vocabulary.
 Inverse of digits_to_words. Raises ValueError on malformed input.
 """
 

@@ -1,0 +1,52 @@
+audio:
+  hop_length: 160
+  n_fft: 512
+  n_mels: 80
+  samplerate: 16000
+  win_length: 400
+aug:
+  gain_prob: 0.7
+  noise_prob: 0.3
+  pitch_prob: 0.3
+  rir_prob: 0.1
+  specaug_freq_mask_param: 15
+  specaug_num_freq_masks: 2
+  specaug_num_time_masks: 5
+  specaug_time_mask_max_ratio: 0.05
+  specaug_time_mask_param: 25
+  speed_factors:
+  - 0.9
+  - 1.0
+  - 1.1
+  speed_prob: 1.0
+  vtlp_prob: 0.5
+data:
+  max_tokens_per_batch: 50000
+  num_buckets: 20
+  target_samplerate: 16000
+decoding:
+  alpha: 0.7
+  beam_width: 100
+  beta: 1.0
+model:
+  d_cnn: 64
+  dropout: 0.05500215104453339
+  name: crdnn
+  rnn_hidden: 256
+  rnn_layers: 2
+  subsample_factor: 1
+train:
+  early_stop_metric: max_speaker_cer
+  early_stop_patience: 15
+  fp16_autocast: true
+  grad_accum: 2
+  grad_clip_norm: 1.0
+  lr: 0.0012200200009846104
+  max_epochs: 100
+  optimizer:
+    lr: 0.0012200200009846104
+    name: adamw
+    weight_decay: 1.0e-06
+  scheduler:
+    name: cosine
+    warmup_steps: 2753

@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import shutil
 import subprocess
 import sys
@@ -36,11 +37,18 @@ if str(_REPO_SRC) not in sys.path:
     sys.path.insert(0, str(_REPO_SRC))
 
 import torch
+import yaml
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s"
 )
 log = logging.getLogger("gp1.export")
+
+# Use shared config loader from gp1.config to resolve `defaults:` inheritance.
+try:
+    from gp1.config import load_config as _resolve_config  # type: ignore[assignment]
+except ImportError:  # pragma: no cover
+    _resolve_config = None  # type: ignore[assignment]
 
 
 # ---------------------------------------------------------------------------
@@ -96,13 +104,18 @@ def _write_release_metadata(
         best_val_cer: Best validation CER from training.
     """
     git_commit = _git_commit_hash()
+    # Convert NaN/inf to JSON null so release.json is RFC 8259 compliant
+    # (jq and Node.JSON.parse reject the non-standard Infinity literal).
+    cer_for_json = (
+        None if (math.isinf(best_val_cer) or math.isnan(best_val_cer)) else best_val_cer
+    )
     metadata = {
         "baseline": baseline,
         "tag": tag,
         "git_commit": git_commit,
         "checkpoint_source": checkpoint_source,
         "params_count": params_count,
-        "best_val_cer": best_val_cer,
+        "best_val_cer": cer_for_json,
     }
     meta_path = release_dir / "release.json"
     meta_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
@@ -250,8 +263,19 @@ def export(
     log.info("Wrote model.pt (%d bytes)", model_pt_path.stat().st_size)
 
     # ----------------------------------------------------------------- config
-    shutil.copy2(config_path, release_dir / "config.yaml")
-    log.info("Copied config.yaml from %s", config_path)
+    # H9: resolve `defaults:` inheritance before writing config.yaml so the
+    # released config is self-contained (no relative `defaults:` references).
+    config_dst = release_dir / "config.yaml"
+    if _resolve_config is not None:
+        resolved_cfg = _resolve_config(config_path)
+        config_dst.write_text(
+            yaml.dump(resolved_cfg, allow_unicode=True, sort_keys=False),
+            encoding="utf-8",
+        )
+        log.info("Wrote resolved config.yaml from %s", config_path)
+    else:
+        shutil.copy2(config_path, config_dst)
+        log.info("Copied config.yaml (resolution unavailable) from %s", config_path)
 
     # -------------------------------------------------------------------- lm
     if lm_binary_path is not None:

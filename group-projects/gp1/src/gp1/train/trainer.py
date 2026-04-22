@@ -24,7 +24,6 @@ only needs to supply raw audio waveforms (Batch.audio).
 
 from __future__ import annotations
 
-import dataclasses
 import logging
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -33,6 +32,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 
+from gp1.data.spec_aug import SpecAugmenter
 from gp1.decoding.greedy import greedy_decode
 from gp1.features.melbanks import LogMelFilterBanks
 from gp1.text.vocab import CharVocab
@@ -76,6 +76,7 @@ class TrainerConfig:
     early_stop_patience: int = 15
     early_stop_metric: str = "max_speaker_cer"
     ckpt_dir: Path = field(default_factory=lambda: Path("checkpoints"))
+    grad_clip_norm: float | None = None  # H4: max gradient norm; None = no clipping
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +134,8 @@ class Trainer:
         config: TrainerConfig,
         device: torch.device,
         wandb_run=None,
+        audio_cfg: dict[str, Any] | None = None,
+        spec_augmenter: SpecAugmenter | None = None,
     ) -> None:
         self.model = model.to(device)
         self.ctc_loss = ctc_loss
@@ -149,7 +152,29 @@ class Trainer:
         self.wandb_run = wandb_run
 
         # Mel-feature extractor lives on the same device as the model.
-        self._mel = LogMelFilterBanks().to(device)
+        # audio_cfg is passed through from the YAML config (H8 fix).
+        self._mel = LogMelFilterBanks(**(audio_cfg or {})).to(device)
+
+        # H1: optional SpecAugmenter — applied to mel after extraction,
+        # before the encoder forward pass, training mode only.
+        self._spec_augmenter: SpecAugmenter | None = spec_augmenter
+        if self._spec_augmenter is not None:
+            # Only call .to(device) on real nn.Module instances; a MagicMock
+            # passed in tests would return a different mock object from .to().
+            if isinstance(self._spec_augmenter, nn.Module):
+                self._spec_augmenter = self._spec_augmenter.to(device)
+            logger.info(
+                "SpecAugmenter enabled: freq_mask_param=%d, time_mask_param=%d",
+                self._spec_augmenter.freq_mask_param,
+                self._spec_augmenter.time_mask_param,
+            )
+        else:
+            logger.info("SpecAugmenter disabled (spec_augmenter=None).")
+
+        # H6: fail fast if inter_ctc is configured but the model never
+        # returns intermediate features. We run a single dry-run forward.
+        if self.inter_ctc is not None:
+            self._validate_inter_ctc_model(model)
 
         self._global_step: int = 0
         self._best_val_cer: float = _INF_CER
@@ -157,6 +182,25 @@ class Trainer:
         self._no_improve_epochs: int = 0
 
         config.ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+    def _validate_inter_ctc_model(self, model: nn.Module) -> None:
+        """Dry-run the model with a minimal dummy input to check intermediate."""
+        dummy_mel = torch.zeros(1, 80, 16, device=self.device)
+        dummy_lengths = torch.tensor([16], dtype=torch.long, device=self.device)
+        try:
+            model.eval()
+            with torch.no_grad():
+                out = model(dummy_mel, dummy_lengths)
+        finally:
+            # Restore train mode regardless of outcome.
+            model.train()
+
+        if out.intermediate is None:
+            raise ValueError(
+                "InterCTC is enabled but the model returns intermediate=None. "
+                "Use a model with an intermediate tap (e.g. QuartzNet10x4). "
+                "CRDNN and FastConformerBPE do not support InterCTC."
+            )
 
     # ------------------------------------------------------------------
     # Public API
@@ -181,11 +225,16 @@ class Trainer:
         except ImportError:
             epoch_iter = range(1, self.config.max_epochs + 1)
 
+        last_executed_epoch = 0
+        last_validated_epoch = 0
+
         for epoch in epoch_iter:
             self._train_epoch(epoch)
+            last_executed_epoch = epoch
 
             if epoch % self.config.val_every_n_epochs == 0:
                 val_cer = self._run_validation(epoch)
+                last_validated_epoch = epoch
                 improved = val_cer < self._best_val_cer
 
                 if improved:
@@ -216,6 +265,20 @@ class Trainer:
                         self._no_improve_epochs,
                     )
                     break
+
+        # M11: run a final validation pass for the actual last executed epoch
+        # when it was not already validated (early-stop at a non-val epoch, or
+        # max_epochs not a multiple of val_every_n_epochs).
+        if last_executed_epoch > last_validated_epoch:
+            logger.info(
+                "Running final validation for epoch %d (not covered by periodic val).",
+                last_executed_epoch,
+            )
+            val_cer = self._run_validation(last_executed_epoch)
+            improved = val_cer < self._best_val_cer
+            if improved:
+                self._best_val_cer = val_cer
+                self._save_checkpoint(last_executed_epoch, val_cer)
 
         # If we never improved (e.g. model immediately returns 1.0 CER),
         # create an initial checkpoint so callers always get a valid path.
@@ -260,6 +323,14 @@ class Trainer:
             is_last_micro = (micro_idx + 1) % self.config.grad_accum == 0
 
             if is_last_micro:
+                if self.config.grad_clip_norm is not None:
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(),
+                        max_norm=self.config.grad_clip_norm,
+                    )
+                    logger.debug(
+                        "Gradient clipped to max_norm=%.4f", self.config.grad_clip_norm
+                    )
                 self.optimizer.step()
                 self.scheduler.step()
                 self.optimizer.zero_grad()
@@ -312,10 +383,18 @@ class Trainer:
         # Mel extraction: [B, T_audio] → [B, n_mels, T_frames]
         with torch.no_grad():
             mel = self._mel(audio)  # [B, 80, T_frames]
-            # Compute mel frame lengths from audio lengths
+            # Compute mel frame lengths: center=True STFT pads by n_fft//2 on
+            # both sides, so T_frames = L // hop + 1. Clamp to guard against
+            # any frontend edge-case (C1 fix).
             hop = self._mel.hop_length
-            mel_lengths = (audio_lengths // hop).long()
-            mel_lengths = torch.clamp(mel_lengths, max=mel.size(-1))
+            mel_lengths = (audio_lengths // hop + 1).clamp(max=mel.size(-1)).long()
+
+        # H1: apply SpecAugmenter in training mode (after mel, before encoder).
+        # SpecAugmenter itself respects self.training; the guard here is an
+        # extra safety belt to avoid masking validation batches.
+        if self._spec_augmenter is not None and self.model.training:
+            self._spec_augmenter.train()
+            mel = self._spec_augmenter(mel, mel_lengths)
 
         autocast_ctx = torch.autocast(
             device_type=self.device.type,
@@ -350,8 +429,9 @@ class Trainer:
             audio2_lengths = batch.audio_view2_lengths.to(self.device)
             with torch.no_grad():
                 mel2 = self._mel(audio2)
-                mel2_lengths = (audio2_lengths // hop).long()
-                mel2_lengths = torch.clamp(mel2_lengths, max=mel2.size(-1))
+                mel2_lengths = (
+                    (audio2_lengths // hop + 1).clamp(max=mel2.size(-1)).long()
+                )
             with autocast_ctx:
                 encoder_out2 = self.model(mel2, mel2_lengths)
             log_probs2 = encoder_out2.log_probs.float()
@@ -423,8 +503,9 @@ class Trainer:
 
                 mel = self._mel(audio)
                 hop = self._mel.hop_length
-                mel_lengths = (audio_lengths // hop).long()
-                mel_lengths = torch.clamp(mel_lengths, max=mel.size(-1))
+                # center=True STFT: T_frames = L // hop + 1. Clamp to guard
+                # against edge cases. Same formula as _forward_batch (C1 fix).
+                mel_lengths = (audio_lengths // hop + 1).clamp(max=mel.size(-1)).long()
 
                 encoder_out = self.model(mel, mel_lengths)
                 decoded = greedy_decode(

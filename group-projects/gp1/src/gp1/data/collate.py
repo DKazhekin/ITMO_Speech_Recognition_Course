@@ -28,34 +28,6 @@ log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Internal helper
-# ---------------------------------------------------------------------------
-
-
-def _pad_to_multiple(
-    tensor: torch.Tensor, multiple: int, value: float = 0.0
-) -> torch.Tensor:
-    """Pad a 1-D tensor on the right so its length is a multiple of *multiple*.
-
-    Returns the original tensor unchanged if it is already aligned.
-
-    Args:
-        tensor: 1-D float tensor to pad.
-        multiple: Desired length multiple.
-        value: Fill value for padding positions.
-
-    Returns:
-        Padded (or unchanged) 1-D tensor.
-    """
-    current = tensor.shape[0]
-    remainder = current % multiple
-    if remainder == 0:
-        return tensor
-    pad_len = multiple - remainder
-    return torch.nn.functional.pad(tensor, (0, pad_len), value=value)
-
-
-# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -196,6 +168,9 @@ class DynamicBucketSampler(torch.utils.data.Sampler):
         self._num_buckets = max(1, num_buckets)
         self._shuffle = shuffle
         self._seed: int = 0
+        self._epoch: int = (
+            0  # incremented each __iter__ call for distinct per-epoch ordering
+        )
 
         # Pre-compute batch lists (shuffle-independent structure).
         self._batches: list[list[int]] = self._build_batches(shuffle=False)
@@ -205,21 +180,37 @@ class DynamicBucketSampler(torch.utils.data.Sampler):
     # ------------------------------------------------------------------
 
     def __len__(self) -> int:
-        return len(list(self._build_batches(shuffle=self._shuffle)))
+        return len(list(self._build_batches(shuffle=self._shuffle, epoch=self._epoch)))
 
     def __iter__(self):
-        batches = self._build_batches(shuffle=self._shuffle)
+        batches = self._build_batches(shuffle=self._shuffle, epoch=self._epoch)
+        self._epoch += 1
         yield from batches
+
+    def set_epoch(self, epoch: int) -> None:
+        """Explicitly set the epoch counter for reproducible per-epoch shuffling.
+
+        Mirrors the ``torch.utils.data.DistributedSampler.set_epoch`` API.
+        Calling ``set_epoch(n)`` before iterating ensures that epoch *n* always
+        produces the same shuffle regardless of how many times ``__iter__``
+        was called before.
+
+        Args:
+            epoch: Zero-based epoch index.
+        """
+        self._epoch = epoch
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _build_batches(self, shuffle: bool) -> list[list[int]]:
+    def _build_batches(self, shuffle: bool, epoch: int = 0) -> list[list[int]]:
         """Build the list of mini-batches from scratch.
 
         Sorting + bucketing is deterministic regardless of *shuffle*; only
         the order of the resulting batches changes when *shuffle* is True.
+        The effective seed is ``self._seed + epoch`` so each epoch sees a
+        distinct (but reproducible) permutation.
         """
         n = len(self._lengths)
         if n == 0:
@@ -242,7 +233,7 @@ class DynamicBucketSampler(torch.utils.data.Sampler):
             all_batches.extend(bucket_batches)
 
         if shuffle:
-            rng = random.Random(self._seed)
+            rng = random.Random(self._seed + epoch)
             rng.shuffle(all_batches)
             for mb in all_batches:
                 rng.shuffle(mb)
