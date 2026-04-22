@@ -311,6 +311,36 @@ class Trainer:
 
         total_loss = loss_ctc
 
+        # --- CR-CTC consistency loss (two-view) ---
+        # Requires a second augmented view (batch.audio_view2) and computes
+        # the symmetric KL between the two log-prob outputs. Reference:
+        # "Consistency Regularisation for CTC" (Yao et al. 2024).
+        if self.cr_ctc is not None:
+            if batch.audio_view2 is None or batch.audio_view2_lengths is None:
+                raise ValueError(
+                    "cr_ctc head is active but batch.audio_view2 is None — "
+                    "construct the Dataset with return_two_views=True to populate it."
+                )
+            audio2 = batch.audio_view2.to(self.device)
+            audio2_lengths = batch.audio_view2_lengths.to(self.device)
+            with torch.no_grad():
+                mel2 = self._mel(audio2)
+                mel2_lengths = (audio2_lengths // hop).long()
+                mel2_lengths = torch.clamp(mel2_lengths, max=mel2.size(-1))
+            with autocast_ctx:
+                encoder_out2 = self.model(mel2, mel2_lengths)
+            log_probs2 = encoder_out2.log_probs.float()
+            # Align time dimension: CR-CTC requires both views to have the
+            # same T'. Truncate to the min (both from the same underlying
+            # utterance so lengths are typically identical up to rounding).
+            t_min = min(log_probs.size(1), log_probs2.size(1))
+            loss_cr = self.cr_ctc(
+                ctc_lp_fp32[:, :t_min, :],
+                log_probs2[:, :t_min, :],
+                torch.clamp(output_lengths, max=t_min),
+            )
+            total_loss = total_loss + 0.2 * loss_cr
+
         # --- InterCTC auxiliary loss ---
         if self.inter_ctc is not None and encoder_out.intermediate is not None:
             loss_inter = self.inter_ctc(
@@ -320,14 +350,23 @@ class Trainer:
 
         # --- Word-aux CTC ---
         if self.word_aux is not None:
-            # word_aux expects enc_features [B, T', D]; use intermediate if available
-            enc_features = (
-                encoder_out.intermediate
-                if encoder_out.intermediate is not None
-                else log_probs
-            )
+            if batch.word_targets is None or batch.word_target_lengths is None:
+                raise ValueError(
+                    "word_aux head is active but batch.word_targets is None — "
+                    "construct the Dataset with word_vocab=WordVocab() to populate it."
+                )
+            if encoder_out.intermediate is None:
+                raise ValueError(
+                    "word_aux head requires encoder_out.intermediate features "
+                    "[B, T', D_mid]; the current encoder does not expose them."
+                )
+            word_targets = batch.word_targets.to(self.device)
+            word_target_lengths = batch.word_target_lengths.to(self.device)
             loss_word = self.word_aux(
-                enc_features, output_lengths, targets, target_lengths
+                encoder_out.intermediate,
+                output_lengths,
+                word_targets,
+                word_target_lengths,
             )
             total_loss = total_loss + 0.1 * loss_word
 

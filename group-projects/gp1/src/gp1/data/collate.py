@@ -87,6 +87,20 @@ def collate_fn(
     spk_ids: list[str] = [item["spk_id"] for item in batch]
     transcriptions: list[str] = [item["transcription"] for item in batch]
 
+    # Word-level targets are optional — the Dataset only populates them
+    # when constructed with a WordVocab (enables the word-aux CTC head).
+    has_word_targets = "word_target" in batch[0]
+    word_targets_list: list[torch.Tensor] = (
+        [item["word_target"] for item in batch] if has_word_targets else []
+    )
+
+    # Second augmented view is optional — populated by the Dataset only
+    # when ``return_two_views=True`` (enables the CR-CTC consistency loss).
+    has_view2 = "audio_view2" in batch[0]
+    view2_list: list[torch.Tensor] = (
+        [item["audio_view2"] for item in batch] if has_view2 else []
+    )
+
     # Record actual (unpadded) lengths before padding.
     audio_lengths = torch.tensor([a.shape[0] for a in audios], dtype=torch.int64)
     target_lengths = torch.tensor([t.shape[0] for t in targets], dtype=torch.int64)
@@ -107,6 +121,31 @@ def collate_fn(
     for i, tgt in enumerate(targets):
         targets_padded[i, : tgt.shape[0]] = tgt
 
+    word_targets_padded: torch.Tensor | None = None
+    word_target_lengths: torch.Tensor | None = None
+    if has_word_targets:
+        wtl = torch.tensor([w.shape[0] for w in word_targets_list], dtype=torch.int64)
+        max_word_len = int(wtl.max().item())
+        wtp = torch.zeros(len(batch), max_word_len, dtype=torch.int64)
+        for i, w in enumerate(word_targets_list):
+            wtp[i, : w.shape[0]] = w
+        word_target_lengths = wtl
+        word_targets_padded = wtp
+
+    audio_view2_padded: torch.Tensor | None = None
+    audio_view2_lengths: torch.Tensor | None = None
+    if has_view2:
+        v2_lengths = torch.tensor([v.shape[0] for v in view2_list], dtype=torch.int64)
+        v2_max = int(v2_lengths.max().item())
+        v2_padded_max = (
+            math.ceil(v2_max / pad_audio_to_multiple) * pad_audio_to_multiple
+        )
+        v2_padded = torch.zeros(len(batch), v2_padded_max, dtype=torch.float32)
+        for i, v in enumerate(view2_list):
+            v2_padded[i, : v.shape[0]] = v
+        audio_view2_padded = v2_padded
+        audio_view2_lengths = v2_lengths
+
     return Batch(
         audio=audio_padded,
         audio_lengths=audio_lengths,
@@ -114,6 +153,10 @@ def collate_fn(
         target_lengths=target_lengths,
         spk_ids=spk_ids,
         transcriptions=transcriptions,
+        word_targets=word_targets_padded,
+        word_target_lengths=word_target_lengths,
+        audio_view2=audio_view2_padded,
+        audio_view2_lengths=audio_view2_lengths,
     )
 
 

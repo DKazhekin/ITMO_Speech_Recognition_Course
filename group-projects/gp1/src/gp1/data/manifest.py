@@ -28,7 +28,7 @@ log = logging.getLogger(__name__)
 # Public API
 # ---------------------------------------------------------------------------
 
-
+# TODO: как будто избыточный код, зачем создавать промежуточный манифест, если он все равно попадает в JSONL в виде словаря ?
 def build_manifest(csv_path: Path, audio_root: Path, out_path: Path) -> int:
     """Build a JSONL manifest from a Kaggle-style CSV.
 

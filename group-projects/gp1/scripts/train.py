@@ -1,6 +1,6 @@
 """Training entrypoint for GP1 Russian spoken-numbers ASR.
 
-Wires CONTRACTS.md §4 (data pipeline) + §5 (QuartzNet10x4) + §6 (losses)
+Wires CONTRACTS.md §4 (data pipeline) + §5 (model registry) + §6 (losses)
 + §8 (Trainer) together into a CLI.
 
 Typical invocation (local):
@@ -40,14 +40,28 @@ from torch.utils.data import DataLoader
 from gp1.data.audio_aug import AudioAugmenter
 from gp1.data.collate import DynamicBucketSampler, collate_fn
 from gp1.data.dataset import SpokenNumbersDataset
-from gp1.data.manifest import build_manifest, read_jsonl
+from gp1.data.manifest import ManifestRecord, build_manifest, read_jsonl
+from gp1.losses.cr_ctc import CRCTCLoss
 from gp1.losses.ctc import CTCLoss
+from gp1.losses.inter_ctc import InterCTCHead
+from gp1.losses.word_aux import WordAuxCTCHead
+from gp1.models.crdnn import CRDNN
+from gp1.models.efficient_conformer import EfficientConformer
+from gp1.models.fast_conformer_bpe import FastConformerBPE
 from gp1.models.quartznet import QuartzNet10x4
 from gp1.text.vocab import CharVocab
+from gp1.text.vocab_word import WordVocab
 from gp1.train.optim import build_adamw, build_novograd
 from gp1.train.schedulers import build_cosine_warmup, build_noam
 from gp1.train.trainer import Trainer, TrainerConfig
 from gp1.types import AugConfig
+
+# BPEVocab is imported lazily in _build_vocab to avoid hard dep on sentencepiece.
+# The symbol is aliased here so tests can patch 'train.BPEVocab'.
+try:
+    from gp1.text.vocab_bpe import BPEVocab  # type: ignore[assignment]
+except ImportError:  # pragma: no cover — sentencepiece not installed
+    BPEVocab = None  # type: ignore[assignment,misc]
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s"
@@ -93,6 +107,133 @@ def _build_aug_config(cfg_aug: dict[str, Any], seed: int | None) -> AugConfig:
     if "speed_factors" in kwargs and isinstance(kwargs["speed_factors"], list):
         kwargs["speed_factors"] = tuple(kwargs["speed_factors"])
     return AugConfig(seed=seed, **kwargs)
+
+
+def _build_vocab(cfg: dict[str, Any], config_path: Path) -> CharVocab | Any:
+    """Return the appropriate vocab based on cfg['text']['vocab_type'].
+
+    Defaults to CharVocab when the 'text' section is absent or vocab_type == 'char'.
+    For 'bpe', resolves bpe_model_path relative to the config file's parent directory
+    when the path is not absolute, then constructs BPEVocab.
+    """
+    text_cfg = cfg.get("text") or {}
+    vocab_type = text_cfg.get("vocab_type", "char").lower()
+    if vocab_type == "char":
+        return CharVocab()
+    if vocab_type == "bpe":
+        if BPEVocab is None:  # pragma: no cover
+            raise ImportError(
+                "sentencepiece is required for BPE vocab. "
+                "Install it with: uv pip install sentencepiece"
+            )
+        raw_path = text_cfg.get("bpe_model_path")
+        if raw_path is None:
+            raise ValueError(
+                "cfg.text.bpe_model_path is required when vocab_type == 'bpe'"
+            )
+        bpe_path = Path(raw_path)
+        if not bpe_path.is_absolute():
+            bpe_path = config_path.parent / bpe_path
+        return BPEVocab(bpe_path)
+    raise ValueError(f"Unknown vocab_type: {vocab_type!r}. Expected 'char' or 'bpe'.")
+
+
+def _build_model(cfg: dict[str, Any], vocab_size: int) -> torch.nn.Module:
+    """Instantiate the encoder model specified in cfg['model']['name'].
+
+    Supported names: quartznet_10x4, crdnn, efficient_conformer, fast_conformer_bpe.
+    Raises ValueError for unknown names.
+    """
+    model_cfg = cfg.get("model") or {}
+    name = model_cfg.get("name", "quartznet_10x4").lower()
+
+    if name == "quartznet_10x4":
+        return QuartzNet10x4(
+            vocab_size=vocab_size,
+            d_model=int(model_cfg.get("d_model", 256)),
+            dropout=float(model_cfg.get("dropout", 0.1)),
+            subsample_factor=int(model_cfg.get("subsample_factor", 2)),
+        )
+
+    if name == "crdnn":
+        return CRDNN(
+            vocab_size=vocab_size,
+            d_cnn=int(model_cfg.get("d_cnn", 64)),
+            rnn_hidden=int(model_cfg.get("rnn_hidden", 256)),
+            rnn_layers=int(model_cfg.get("rnn_layers", 2)),
+            dropout=float(model_cfg.get("dropout", 0.15)),
+            subsample_factor=int(model_cfg.get("subsample_factor", 1)),
+        )
+
+    if name == "efficient_conformer":
+        d_model_stages = model_cfg.get("d_model_stages", [96, 128, 128])
+        n_blocks_per_stage = model_cfg.get("n_blocks_per_stage", [4, 4, 4])
+        return EfficientConformer(
+            vocab_size=vocab_size,
+            d_model_stages=tuple(d_model_stages),
+            n_blocks_per_stage=tuple(n_blocks_per_stage),
+            n_heads=int(model_cfg.get("n_heads", 4)),
+            ff_ratio=int(model_cfg.get("ff_ratio", 4)),
+            conv_kernel=int(model_cfg.get("conv_kernel", 15)),
+            dropout=float(model_cfg.get("dropout", 0.1)),
+        )
+
+    if name == "fast_conformer_bpe":
+        return FastConformerBPE(
+            vocab_size=vocab_size,
+            d_model=int(model_cfg.get("d_model", 96)),
+            n_blocks=int(model_cfg.get("n_blocks", 16)),
+            n_heads=int(model_cfg.get("n_heads", 4)),
+            ff_ratio=int(model_cfg.get("ff_ratio", 4)),
+            conv_kernel=int(model_cfg.get("conv_kernel", 9)),
+            dropout=float(model_cfg.get("dropout", 0.1)),
+            subsample_factor=int(model_cfg.get("subsample_factor", 4)),
+        )
+
+    raise ValueError(
+        f"Unknown model name: {name!r}. "
+        "Expected one of: quartznet_10x4, crdnn, efficient_conformer, fast_conformer_bpe."
+    )
+
+
+def _build_inter_ctc(
+    cfg: dict[str, Any], d_mid: int, vocab_size: int, blank_id: int
+) -> InterCTCHead | None:
+    """Return InterCTCHead when cfg['inter_ctc']['enabled'] is True, else None."""
+    inter_cfg = cfg.get("inter_ctc") or {}
+    if not inter_cfg.get("enabled", False):
+        return None
+    return InterCTCHead(d_mid=d_mid, vocab_size=vocab_size, blank_id=blank_id)
+
+
+def _build_cr_ctc(cfg: dict[str, Any]) -> CRCTCLoss | None:
+    """Return CRCTCLoss when cfg['cr_ctc']['enabled'] is True, else None."""
+    cr_cfg = cfg.get("cr_ctc") or {}
+    if not cr_cfg.get("enabled", False):
+        return None
+    return CRCTCLoss(
+        temperature=float(cr_cfg.get("temperature", 1.0)),
+        min_prob=float(cr_cfg.get("min_prob", 0.1)),
+    )
+
+
+def _build_train_dataset(
+    records: list[ManifestRecord],
+    vocab: Any,
+    target_sr: int,
+    augmenter: AudioAugmenter | None,
+    word_vocab: WordVocab | None,
+    return_two_views: bool = False,
+) -> SpokenNumbersDataset:
+    """Build the training dataset, enabling two-view audio when cr_ctc is active."""
+    return SpokenNumbersDataset(
+        records,
+        vocab,
+        target_samplerate=target_sr,
+        augmenter=augmenter,
+        word_vocab=word_vocab,
+        return_two_views=return_two_views,
+    )
 
 
 def _build_dataloader(
@@ -205,16 +346,34 @@ def main() -> int:
     dev_records = read_jsonl(dev_manifest_path)
     log.info("Loaded %d train / %d dev records", len(train_records), len(dev_records))
 
-    vocab = CharVocab()
+    vocab = _build_vocab(cfg, args.config)
     aug_config = _build_aug_config(cfg.get("aug", {}), seed=args.seed)
     augmenter = AudioAugmenter(aug_config)
 
+    word_aux_cfg = cfg.get("word_aux") or {}
+    word_aux_enabled = bool(word_aux_cfg.get("enabled", False))
+    word_vocab = WordVocab() if word_aux_enabled else None
+    if word_aux_enabled:
+        log.info("Word-aux CTC head enabled (word_vocab_size=%d)", word_vocab.size)
+
+    # Build cr_ctc early — needed to set return_two_views on train_ds.
+    cr_ctc_head = _build_cr_ctc(cfg)
+
     target_sr = int(cfg.get("audio", {}).get("samplerate", 16000))
-    train_ds = SpokenNumbersDataset(
-        train_records, vocab, target_samplerate=target_sr, augmenter=augmenter
+    train_ds = _build_train_dataset(
+        records=train_records,
+        vocab=vocab,
+        target_sr=target_sr,
+        augmenter=augmenter,
+        word_vocab=word_vocab,
+        return_two_views=(cr_ctc_head is not None),
     )
     dev_ds = SpokenNumbersDataset(
-        dev_records, vocab, target_samplerate=target_sr, augmenter=None
+        dev_records,
+        vocab,
+        target_samplerate=target_sr,
+        augmenter=None,
+        word_vocab=word_vocab,
     )
 
     data_cfg = cfg.get("data", {})
@@ -239,19 +398,38 @@ def main() -> int:
 
     # ----------------------------------------------------------------- model
     model_cfg = cfg.get("model", {})
-    model = QuartzNet10x4(
-        vocab_size=vocab.vocab_size,
-        d_model=int(model_cfg.get("d_model", 256)),
-        dropout=float(model_cfg.get("dropout", 0.1)),
-    )
+    model = _build_model(cfg, vocab_size=vocab.vocab_size)
+    model_name = model_cfg.get("name", "quartznet_10x4")
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    log.info("QuartzNet10x4 trainable params: %d (%.2fM)", n_params, n_params / 1e6)
+    log.info("%s trainable params: %d (%.2fM)", model_name, n_params, n_params / 1e6)
 
     ctc_loss = CTCLoss(blank_id=vocab.blank_id)
 
+    # inter_ctc: derive d_mid from model attribute or fall back to cfg d_model.
+    d_mid = getattr(model, "_d_mid", int(model_cfg.get("d_model", 256)))
+    inter_ctc_head = _build_inter_ctc(
+        cfg, d_mid=d_mid, vocab_size=vocab.vocab_size, blank_id=vocab.blank_id
+    )
+
+    word_aux_head: WordAuxCTCHead | None = None
+    if word_aux_enabled:
+        assert word_vocab is not None
+        d_enc_word = int(word_aux_cfg.get("d_enc", model_cfg.get("d_model", 256)))
+        word_aux_head = WordAuxCTCHead(
+            d_enc=d_enc_word,
+            word_vocab_size=word_vocab.size,
+            blank_id=WordVocab.BLANK_ID,
+        )
+
     # -------------------------------------------------------------- optimizer
     train_cfg = cfg.get("train", {})
-    optimizer = _build_optimizer(train_cfg.get("optimizer", {}), model.parameters())
+    trainable_params: list = list(model.parameters())
+    if inter_ctc_head is not None:
+        trainable_params += list(inter_ctc_head.parameters())
+    if word_aux_head is not None:
+        trainable_params += list(word_aux_head.parameters())
+    # CRCTCLoss has no learnable parameters; skip.
+    optimizer = _build_optimizer(train_cfg.get("optimizer", {}), trainable_params)
 
     max_epochs = int(train_cfg.get("max_epochs", 50))
     steps_per_epoch = max(1, len(train_loader) // int(train_cfg.get("grad_accum", 1)))
@@ -294,12 +472,19 @@ def main() -> int:
         except Exception as err:  # pragma: no cover — diagnostic only
             log.warning("wandb init failed (%s); continuing without wandb", err)
 
+    if inter_ctc_head is not None:
+        inter_ctc_head = inter_ctc_head.to(device)
+    if cr_ctc_head is not None:
+        cr_ctc_head = cr_ctc_head.to(device)
+    if word_aux_head is not None:
+        word_aux_head = word_aux_head.to(device)
+
     trainer = Trainer(
         model=model,
         ctc_loss=ctc_loss,
-        inter_ctc=None,
-        cr_ctc=None,
-        word_aux=None,
+        inter_ctc=inter_ctc_head,
+        cr_ctc=cr_ctc_head,
+        word_aux=word_aux_head,
         optimizer=optimizer,
         scheduler=scheduler,
         train_loader=train_loader,

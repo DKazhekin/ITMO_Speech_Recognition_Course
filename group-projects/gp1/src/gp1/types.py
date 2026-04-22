@@ -26,6 +26,15 @@ class Batch:
     target_lengths: torch.Tensor  # [B] int64
     spk_ids: list[str]  # [B]
     transcriptions: list[str]  # [B] digit strings, for metric computation
+    # Optional word-level targets populated only when the Dataset is
+    # constructed with a WordVocab (enables the word-aux CTC head).
+    word_targets: torch.Tensor | None = None  # [B, U_word_max] int64
+    word_target_lengths: torch.Tensor | None = None  # [B] int64
+    # Optional second augmented view of the same utterance, used by the
+    # CR-CTC consistency loss. Populated only when the Dataset is
+    # constructed with ``return_two_views=True``.
+    audio_view2: torch.Tensor | None = None  # [B, T_audio_max] float32
+    audio_view2_lengths: torch.Tensor | None = None  # [B] int64
 
 
 @dataclass(frozen=True)

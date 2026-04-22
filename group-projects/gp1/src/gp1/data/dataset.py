@@ -24,6 +24,7 @@ import torchaudio.transforms
 from gp1.data.audio_aug import AudioAugmenter
 from gp1.text.normalize import digits_to_words
 from gp1.text.vocab import CharVocab
+from gp1.text.vocab_word import WordVocab
 from gp1.types import ManifestRecord
 
 log = logging.getLogger(__name__)
@@ -43,6 +44,9 @@ class SpokenNumbersDataset(torch.utils.data.Dataset):
         augmenter: Optional AudioAugmenter applied in ``__getitem__``.
         return_two_views: When True, also returns ``audio_view2`` produced
             by a second independent augmenter call (used for CR-CTC loss).
+        word_vocab: When provided, each item also exposes ``word_target``
+            — a 1-D int64 tensor of word-level token ids — for the
+            auxiliary word-level CTC head.
     """
 
     def __init__(
@@ -52,12 +56,14 @@ class SpokenNumbersDataset(torch.utils.data.Dataset):
         target_samplerate: int = 16000,
         augmenter: AudioAugmenter | None = None,
         return_two_views: bool = False,
+        word_vocab: WordVocab | None = None,
     ) -> None:
         self._records = list(records)  # defensive copy — immutable inputs
         self._vocab = vocab
         self._target_sr = target_samplerate
         self._augmenter = augmenter
         self._return_two_views = return_two_views
+        self._word_vocab = word_vocab
 
         # Pre-build resamplers keyed by native sample rate.
         # torchaudio.transforms.Resample is stateful but thread-safe for
@@ -101,6 +107,11 @@ class SpokenNumbersDataset(torch.utils.data.Dataset):
             "spk_id": record.spk_id,
             "transcription": record.transcription,
         }
+
+        if self._word_vocab is not None:
+            item["word_target"] = torch.tensor(
+                self._word_vocab.encode(words), dtype=torch.int64
+            )
 
         # Augment — view 2 (independent call; augmenter's internal RNG advances).
         if self._return_two_views:

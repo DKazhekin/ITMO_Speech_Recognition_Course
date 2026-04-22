@@ -52,7 +52,13 @@ class _FakeEncoder(nn.Module):
         # Expand to [B, T'=2, V] — minimal temporal dim for CTC
         log_probs = F.log_softmax(logits, dim=-1).unsqueeze(1).expand(-1, 2, -1)
         out_lengths = torch.full((mel.size(0),), 2, dtype=torch.long)
-        return EncoderOutput(log_probs=log_probs, output_lengths=out_lengths)
+        # Fake intermediate features [B, T'=2, D=80] for word_aux / inter_ctc.
+        intermediate = pooled.unsqueeze(1).expand(-1, 2, -1)
+        return EncoderOutput(
+            log_probs=log_probs,
+            output_lengths=out_lengths,
+            intermediate=intermediate,
+        )
 
 
 def _fake_batch(batch_size: int = 2) -> tuple:
@@ -69,6 +75,8 @@ def _fake_batch(batch_size: int = 2) -> tuple:
     target_lengths = torch.full((batch_size,), 2, dtype=torch.long)
     spk_ids = [f"spk_{i}" for i in range(batch_size)]
     transcriptions = ["один два"] * batch_size
+    word_targets = torch.ones(batch_size, 2, dtype=torch.long)
+    word_target_lengths = torch.full((batch_size,), 2, dtype=torch.long)
     return Batch(
         audio=audio,
         audio_lengths=audio_lengths,
@@ -76,6 +84,8 @@ def _fake_batch(batch_size: int = 2) -> tuple:
         target_lengths=target_lengths,
         spk_ids=spk_ids,
         transcriptions=transcriptions,
+        word_targets=word_targets,
+        word_target_lengths=word_target_lengths,
     )
 
 
@@ -113,7 +123,9 @@ def _make_trainer(
 
     ctc_loss = MagicMock(side_effect=_scalar_loss)
     inter_ctc = MagicMock(side_effect=_scalar_loss)
-    cr_ctc = MagicMock(side_effect=_scalar_loss)
+    # cr_ctc is NOT exercised by most trainer tests and requires
+    # batch.audio_view2 (two-view augmentation). Leave None by default.
+    cr_ctc = None
     word_aux = MagicMock(side_effect=_scalar_loss)
 
     optimizer = torch.optim.SGD(model.parameters(), lr=1e-3)

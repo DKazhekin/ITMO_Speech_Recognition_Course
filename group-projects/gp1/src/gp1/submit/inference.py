@@ -1,8 +1,10 @@
 """Inference pipeline for GP1 Russian spoken-numbers ASR (§10, CONTRACTS.md).
 
-Loads a QuartzNet10x4 checkpoint, builds the log-mel frontend, and runs
-batched CTC decoding over a manifest. Returns ``list[tuple[str, str]]``
-where each tuple is ``(filename, digit_string)`` in manifest order.
+Supports four model architectures (dispatched via ``cfg["model"]["name"]``):
+- ``quartznet_10x4``     → QuartzNet10x4      (char vocab)
+- ``crdnn``              → CRDNN              (char vocab)
+- ``efficient_conformer``→ EfficientConformer (char vocab)
+- ``fast_conformer_bpe`` → FastConformerBPE   (BPE vocab)
 
 Decoding strategy
 -----------------
@@ -10,6 +12,8 @@ Decoding strategy
 - Optional: beam search via pyctcdecode + KenLM when ``lm_binary_path``
   is set *and* both ``pyctcdecode`` and ``kenlm`` are importable.
   Falls back silently to greedy if either dep is missing.
+  BPE vocab falls back to greedy with a warning even if LM path is given,
+  because the beam decoder only supports CharVocab today.
 
 Checkpoint format
 -----------------
@@ -55,6 +59,7 @@ from typing import Any
 
 import soundfile as sf
 import torch
+import torch.nn as nn
 import torchaudio.transforms
 
 from gp1.decoding.greedy import greedy_decode
@@ -210,8 +215,19 @@ def _load_model(
     checkpoint_path: Path,
     cfg: dict[str, Any],
     device: torch.device,
-) -> QuartzNet10x4:
-    """Instantiate QuartzNet10x4 from config and load weights from checkpoint.
+) -> nn.Module:
+    """Instantiate a model from config and load weights from checkpoint.
+
+    Dispatches on ``cfg["model"]["name"]`` (default: ``"quartznet_10x4"``).
+
+    Supported names
+    ---------------
+    - ``quartznet_10x4``
+    - ``crdnn``
+    - ``efficient_conformer``
+    - ``fast_conformer_bpe``
+
+    Raises ``ValueError`` for unknown names.
 
     Notes
     -----
@@ -222,17 +238,117 @@ def _load_model(
     See: https://pytorch.org/docs/stable/generated/torch.load.html
     """
     model_cfg = cfg.get("model", {}) or {}
+    model_name: str = str(model_cfg.get("name", "quartznet_10x4"))
     vocab_size: int = int(model_cfg.get("vocab_size", CharVocab.vocab_size))
-    d_model: int = int(model_cfg.get("d_model", 256))
-    dropout: float = float(model_cfg.get("dropout", 0.1))
-    subsample_factor: int = int(model_cfg.get("subsample_factor", 2))
 
-    model = QuartzNet10x4(
-        vocab_size=vocab_size,
-        d_model=d_model,
-        dropout=dropout,
-        subsample_factor=subsample_factor,
-    )
+    model: nn.Module
+    if model_name == "quartznet_10x4":
+        d_model: int = int(model_cfg.get("d_model", 256))
+        dropout: float = float(model_cfg.get("dropout", 0.1))
+        subsample_factor: int = int(model_cfg.get("subsample_factor", 2))
+        model = QuartzNet10x4(
+            vocab_size=vocab_size,
+            d_model=d_model,
+            dropout=dropout,
+            subsample_factor=subsample_factor,
+        )
+        log.info(
+            "Loading QuartzNet10x4 from %s (vocab_size=%d, d_model=%d)",
+            checkpoint_path,
+            vocab_size,
+            d_model,
+        )
+
+    elif model_name == "crdnn":
+        from gp1.models.crdnn import CRDNN  # lazy — avoid circular at module level
+
+        d_cnn: int = int(model_cfg.get("d_cnn", 64))
+        rnn_hidden: int = int(model_cfg.get("rnn_hidden", 256))
+        rnn_layers: int = int(model_cfg.get("rnn_layers", 2))
+        dropout = float(model_cfg.get("dropout", 0.15))
+        subsample_factor = int(model_cfg.get("subsample_factor", 1))
+        model = CRDNN(
+            vocab_size=vocab_size,
+            d_cnn=d_cnn,
+            rnn_hidden=rnn_hidden,
+            rnn_layers=rnn_layers,
+            dropout=dropout,
+            subsample_factor=subsample_factor,
+        )
+        log.info(
+            "Loading CRDNN from %s (vocab_size=%d, d_cnn=%d, rnn_hidden=%d)",
+            checkpoint_path,
+            vocab_size,
+            d_cnn,
+            rnn_hidden,
+        )
+
+    elif model_name == "efficient_conformer":
+        from gp1.models.efficient_conformer import EfficientConformer
+
+        raw_stages = model_cfg.get("d_model_stages", [96, 128, 128])
+        raw_blocks = model_cfg.get("n_blocks_per_stage", [4, 4, 4])
+        d_model_stages: tuple[int, int, int] = tuple(int(x) for x in raw_stages)  # type: ignore[assignment]
+        n_blocks_per_stage: tuple[int, int, int] = tuple(int(x) for x in raw_blocks)  # type: ignore[assignment]
+        n_heads: int = int(model_cfg.get("n_heads", 4))
+        ff_ratio: int = int(model_cfg.get("ff_ratio", 4))
+        conv_kernel: int = int(model_cfg.get("conv_kernel", 15))
+        dropout = float(model_cfg.get("dropout", 0.1))
+        model = EfficientConformer(
+            vocab_size=vocab_size,
+            d_model_stages=d_model_stages,
+            n_blocks_per_stage=n_blocks_per_stage,
+            n_heads=n_heads,
+            ff_ratio=ff_ratio,
+            conv_kernel=conv_kernel,
+            dropout=dropout,
+        )
+        log.info(
+            "Loading EfficientConformer from %s (vocab_size=%d, stages=%s)",
+            checkpoint_path,
+            vocab_size,
+            d_model_stages,
+        )
+
+    elif model_name == "fast_conformer_bpe":
+        from gp1.models.fast_conformer_bpe import FastConformerBPE
+
+        d_model = int(model_cfg.get("d_model", 96))
+        n_blocks: int = int(model_cfg.get("n_blocks", 16))
+        n_heads = int(model_cfg.get("n_heads", 4))
+        ff_ratio = int(model_cfg.get("ff_ratio", 4))
+        conv_kernel = int(model_cfg.get("conv_kernel", 9))
+        dropout = float(model_cfg.get("dropout", 0.1))
+        subsample_factor = int(model_cfg.get("subsample_factor", 4))
+        model = FastConformerBPE(
+            vocab_size=vocab_size,
+            d_model=d_model,
+            n_blocks=n_blocks,
+            n_heads=n_heads,
+            ff_ratio=ff_ratio,
+            conv_kernel=conv_kernel,
+            dropout=dropout,
+            subsample_factor=subsample_factor,
+        )
+        log.info(
+            "Loading FastConformerBPE from %s (vocab_size=%d, d_model=%d)",
+            checkpoint_path,
+            vocab_size,
+            d_model,
+        )
+
+    else:
+        _known = (
+            "quartznet_10x4",
+            "crdnn",
+            "efficient_conformer",
+            "fast_conformer_bpe",
+        )
+        raise ValueError(
+            f"Unknown model name {model_name!r}. "
+            f"Known architectures: {_known}. "
+            "Check cfg['model']['name'] in your YAML config."
+        )
 
     checkpoint = torch.load(
         checkpoint_path,
@@ -243,14 +359,53 @@ def _load_model(
     model.load_state_dict(state_dict)
     model.to(device)
     model.eval()
-
-    log.info(
-        "Loaded QuartzNet10x4 from %s (vocab_size=%d, d_model=%d)",
-        checkpoint_path,
-        vocab_size,
-        d_model,
-    )
     return model
+
+
+# ---------------------------------------------------------------------------
+# Vocabulary dispatch
+# ---------------------------------------------------------------------------
+
+
+def _build_vocab(cfg: dict[str, Any], config_path: Path) -> Any:
+    """Build the correct vocabulary object based on ``cfg["text"]["vocab_type"]``.
+
+    Parameters
+    ----------
+    cfg:
+        Full config dict (may lack a ``"text"`` section — falls back to char).
+    config_path:
+        Path of the YAML config file.  Used to resolve a relative
+        ``bpe_model_path`` relative to ``config_path.parent``.
+
+    Returns
+    -------
+    CharVocab | BPEVocab
+    """
+    text_cfg: dict[str, Any] = cfg.get("text", {}) or {}
+    vocab_type: str = str(text_cfg.get("vocab_type", "char"))
+
+    if vocab_type == "bpe":
+        from gp1.text.vocab_bpe import BPEVocab  # lazy — sentencepiece optional
+
+        raw_path = text_cfg.get("bpe_model_path", "")
+        if not raw_path:
+            raise ValueError(
+                "cfg['text']['bpe_model_path'] is missing or empty. "
+                "Provide the path to a trained SentencePiece *.model file."
+            )
+        bpe_path = Path(raw_path)
+        if not bpe_path.is_absolute():
+            bpe_path = config_path.parent / bpe_path
+        if not bpe_path.exists():
+            raise FileNotFoundError(
+                f"BPE model file not found: {bpe_path}. "
+                "Train it first with scripts/train_bpe.py or provide an existing file."
+            )
+        return BPEVocab(model_path=bpe_path)
+
+    # Default: character vocab
+    return CharVocab()
 
 
 # ---------------------------------------------------------------------------
@@ -405,11 +560,20 @@ def run_inference(
     hop_length: int = int(audio_cfg.get("hop_length", 160))
 
     # -- Vocabulary and decoder -----------------------------------------------
-    vocab = CharVocab()
+    vocab = _build_vocab(cfg, config.config_path)
 
     beam_decoder = None
     if config.lm_binary_path is not None:
-        beam_decoder = _try_build_beam_decoder(vocab, config.lm_binary_path)
+        text_cfg: dict[str, Any] = cfg.get("text", {}) or {}
+        vocab_type: str = str(text_cfg.get("vocab_type", "char"))
+        if vocab_type == "bpe":
+            log.warning(
+                "Beam search decoder is not supported for BPE vocab; "
+                "falling back to greedy decoding."
+            )
+        else:
+            # Beam decoder only works with CharVocab.
+            beam_decoder = _try_build_beam_decoder(vocab, config.lm_binary_path)
 
     # -- Inference loop -------------------------------------------------------
     results: list[tuple[str, str]] = []

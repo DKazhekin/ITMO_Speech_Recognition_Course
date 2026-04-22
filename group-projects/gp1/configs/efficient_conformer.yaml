@@ -1,0 +1,25 @@
+defaults: [base]
+
+model:
+  name: efficient_conformer
+  d_model_stages: [96, 128, 128]
+  n_blocks_per_stage: [4, 4, 4]
+  n_heads: 4
+  ff_ratio: 4
+  conv_kernel: 15
+  dropout: 0.1
+  subsample_factor: 4
+
+train:
+  optimizer:
+    name: adamw
+    lr: 5.0e-4
+    weight_decay: 1.0e-6
+  scheduler:
+    name: noam
+    warmup_steps: 10000
+  grad_accum: 2
+  fp16_autocast: true
+  max_epochs: 150
+  early_stop_patience: 15
+  early_stop_metric: max_speaker_cer
