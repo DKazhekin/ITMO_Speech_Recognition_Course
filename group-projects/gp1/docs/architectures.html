@@ -1,0 +1,656 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>GP1 ASR — Архитектуры, трансформации тензоров, эксперименты</title>
+<style>
+  :root {
+    --bg: #0f1419;
+    --bg-soft: #1a1f29;
+    --bg-card: #1f2633;
+    --fg: #e3e7ef;
+    --fg-muted: #8b94a7;
+    --accent: #7dd3fc;
+    --accent-warm: #fcd34d;
+    --conv: #60a5fa;
+    --rnn: #c084fc;
+    --attn: #f87171;
+    --ffn: #34d399;
+    --head: #fbbf24;
+    --shape: #a7f3d0;
+    --border: #2d3548;
+    --tap: #f472b6;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    line-height: 1.55;
+    margin: 0;
+    padding: 2.5rem 1.5rem;
+    max-width: 1180px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+  h1, h2, h3, h4 { color: var(--fg); font-weight: 700; letter-spacing: -0.01em; }
+  h1 { font-size: 2.1rem; border-bottom: 2px solid var(--accent); padding-bottom: 0.5rem; margin-bottom: 0.5rem; }
+  h2 { font-size: 1.55rem; margin-top: 3rem; color: var(--accent); }
+  h3 { font-size: 1.2rem; margin-top: 2rem; color: var(--accent-warm); }
+  h4 { font-size: 1.02rem; margin-top: 1.2rem; color: var(--fg); }
+  p, li { color: var(--fg); }
+  .subtitle { color: var(--fg-muted); font-size: 1rem; margin-top: 0; margin-bottom: 2rem; }
+  .card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.2rem 1.4rem;
+    margin: 1.2rem 0;
+  }
+  .card.warn { border-color: var(--accent-warm); }
+  .card.tap { border-color: var(--tap); }
+  code {
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+    font-size: 0.92em;
+    background: var(--bg-soft);
+    padding: 0.08em 0.38em;
+    border-radius: 3px;
+    color: var(--shape);
+  }
+  pre {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 1rem 1.2rem;
+    overflow-x: auto;
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+    font-size: 0.86rem;
+    line-height: 1.5;
+    color: var(--fg);
+  }
+  pre code { background: none; padding: 0; color: inherit; }
+  .trace {
+    display: grid;
+    grid-template-columns: max-content 1fr max-content;
+    gap: 0 1rem;
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+    font-size: 0.88rem;
+    margin: 0.8rem 0;
+    border-collapse: collapse;
+  }
+  .trace > .step {
+    padding: 0.55rem 0.9rem;
+    border-left: 3px solid var(--border);
+    background: var(--bg-soft);
+    color: var(--fg);
+  }
+  .trace > .op {
+    padding: 0.55rem 0.9rem;
+    background: var(--bg-soft);
+    color: var(--fg);
+  }
+  .trace > .shape {
+    padding: 0.55rem 0.9rem;
+    background: var(--bg-soft);
+    color: var(--shape);
+    text-align: left;
+    border-right: 3px solid var(--border);
+    font-weight: 600;
+  }
+  .trace > .conv { border-left-color: var(--conv); }
+  .trace > .rnn { border-left-color: var(--rnn); }
+  .trace > .attn { border-left-color: var(--attn); }
+  .trace > .ffn { border-left-color: var(--ffn); }
+  .trace > .head { border-left-color: var(--head); }
+  .trace > .tap { border-left-color: var(--tap); }
+  .trace > .input { border-left-color: var(--accent); color: var(--accent); }
+  .trace > .output { border-left-color: var(--head); color: var(--head); font-weight: 600; }
+  .legend {
+    display: flex;
+    gap: 1.3rem;
+    flex-wrap: wrap;
+    margin: 1rem 0 1.5rem 0;
+    font-size: 0.88rem;
+    color: var(--fg-muted);
+  }
+  .legend span { display: inline-flex; align-items: center; }
+  .legend span::before {
+    content: "";
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border-radius: 3px;
+    margin-right: 0.4rem;
+  }
+  .legend .l-conv::before { background: var(--conv); }
+  .legend .l-rnn::before { background: var(--rnn); }
+  .legend .l-attn::before { background: var(--attn); }
+  .legend .l-ffn::before { background: var(--ffn); }
+  .legend .l-head::before { background: var(--head); }
+  .legend .l-tap::before { background: var(--tap); }
+  .legend .l-input::before { background: var(--accent); }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1rem 0;
+    font-size: 0.9rem;
+  }
+  th, td {
+    text-align: left;
+    padding: 0.6rem 0.9rem;
+    border-bottom: 1px solid var(--border);
+  }
+  th { background: var(--bg-card); color: var(--accent); font-weight: 600; }
+  td code { color: var(--shape); }
+  .kv {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 0.3rem 1rem;
+    font-size: 0.9rem;
+    margin: 0.6rem 0;
+  }
+  .kv dt { color: var(--fg-muted); font-family: "SF Mono", Monaco, monospace; }
+  .kv dd { margin: 0; color: var(--shape); }
+  .formula {
+    background: var(--bg-soft);
+    border-left: 3px solid var(--accent);
+    padding: 0.8rem 1.1rem;
+    margin: 1rem 0;
+    font-family: "SF Mono", Monaco, monospace;
+    font-size: 0.92rem;
+    color: var(--shape);
+  }
+  .note {
+    border-left: 3px solid var(--accent-warm);
+    background: var(--bg-soft);
+    padding: 0.8rem 1.1rem;
+    margin: 1rem 0;
+    color: var(--fg);
+    font-size: 0.92rem;
+  }
+  .toc {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem 1.3rem;
+    margin-bottom: 2.5rem;
+  }
+  .toc ol { margin: 0; padding-left: 1.4rem; }
+  .toc a { color: var(--accent); text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+  .small { font-size: 0.85rem; color: var(--fg-muted); }
+</style>
+</head>
+<body>
+
+<h1>GP1 ASR — Архитектуры и трансформации тензоров</h1>
+<p class="subtitle">Как один сэмпл превращается в log-probs в каждой из четырёх архитектур, что делает mel-фронтенд, и как эксперименты (InterCTC / CR-CTC / WordAux) подключаются к обучению.</p>
+
+<div class="toc">
+  <strong>Содержание</strong>
+  <ol>
+    <li><a href="#setup">Опорный пример и форма батча</a></li>
+    <li><a href="#mel">Mel-фронтенд — LogMelFilterBanks</a></li>
+    <li><a href="#quartznet">QuartzNet 10x4 — TCS-conv стек</a></li>
+    <li><a href="#crdnn">CRDNN — Conv2D + BiGRU</a></li>
+    <li><a href="#efficient">Efficient Conformer — progressive downsample</a></li>
+    <li><a href="#fast">Fast Conformer BPE — subsample ×4 → 16 блоков</a></li>
+    <li><a href="#ctc">Как работает CTC-loss</a></li>
+    <li><a href="#experiments">Эксперименты: InterCTC, CR-CTC, WordAux</a></li>
+    <li><a href="#cheatsheet">Шпаргалка</a></li>
+  </ol>
+</div>
+
+<div class="legend">
+  <span class="l-input">вход / выход</span>
+  <span class="l-conv">свёртка</span>
+  <span class="l-rnn">RNN</span>
+  <span class="l-attn">attention</span>
+  <span class="l-ffn">FFN / linear</span>
+  <span class="l-head">CTC head</span>
+  <span class="l-tap">tap для InterCTC</span>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="setup">1. Опорный пример и форма батча</h2>
+
+<p>Чтобы видеть, как именно меняется <code>T</code> (временная ось), берём один сэмпл длиной <strong>2 секунды</strong> речи — реальный средний размер для задачи "русские цифры":</p>
+
+<dl class="kv">
+  <dt>Сырое аудио</dt>           <dd>[B=1, T_audio=32000] float32, 16 kHz моно</dd>
+  <dt>n_fft</dt>                 <dd>512 (frequency bins = n_fft/2 + 1 = 257)</dd>
+  <dt>hop_length</dt>            <dd>160 (10 ms шаг)</dd>
+  <dt>win_length</dt>            <dd>400 (25 ms окно Ханна)</dd>
+  <dt>n_mels</dt>                <dd>80</dd>
+  <dt>Количество mel-кадров</dt> <dd>T_mel = T_audio / hop + 1 = 32000/160 + 1 = <strong>201</strong></dd>
+</dl>
+
+<div class="note">
+  <strong>В батче:</strong> длина <code>T</code> каждого сэмпла разная, но после <code>collate_fn</code> все сэмплы паддятся нулями до <code>T_max</code> в батче. Модель получает <code>[B, 80, T_max]</code> и <code>mel_lengths: [B]</code> — фактические длины до padding. Все shape-формулы ниже работают и для батча — просто на месте <code>T</code> подставь максимум по батчу.
+</div>
+
+<p>Количество <strong>целевых символов</strong> <code>U</code> для "<em>сто пятьдесят девять тысяч четыреста семьдесят три</em>" (число 159473) — около 44 символов (с пробелами). <strong>Инвариант CTC</strong>: <code>T' &gt;= 2 · U_max</code>, где <code>T'</code> — выход энкодера.</p>
+
+<!-- ============================================================ -->
+<h2 id="mel">2. Mel-фронтенд — LogMelFilterBanks</h2>
+
+<p>Файл: <code>src/gp1/features/melbanks.py</code>. Общий для всех 4 моделей, применяется внутри <code>Trainer._mel_features()</code> до модели.</p>
+
+<div class="trace">
+  <div class="step input">[1]</div><div class="op">Вход: сырое аудио</div><div class="shape">[1, 32000]</div>
+  <div class="step conv">[2]</div><div class="op">torch.stft(n_fft=512, hop=160, win=400, Hann)</div><div class="shape">[1, 257, 201] complex</div>
+  <div class="step ffn">[3]</div><div class="op">|x|² — power spectrum</div><div class="shape">[1, 257, 201]</div>
+  <div class="step ffn">[4]</div><div class="op">mel_matrix @ power  (mel_matrix: [80, 257])</div><div class="shape">[1, 80, 201]</div>
+  <div class="step output">[5]</div><div class="op">log(· + 1e-6) — log-mel</div><div class="shape">[1, 80, 201]</div>
+</div>
+
+<div class="formula">T_mel = floor(T_audio / hop_length) + 1 = 32000 / 160 + 1 = 201</div>
+
+<p>Почему log-mel, а не сырой спектр: слух человека воспринимает интенсивность логарифмически, и log-mel стабилизирует динамический диапазон. <code>n_mels=80</code> — стандартный для ASR баланс между частотным разрешением и размером фичи.</p>
+
+<!-- ============================================================ -->
+<h2 id="quartznet">3. QuartzNet 10x4 — TCS-conv стек</h2>
+
+<div class="card">
+  <h4>Идея</h4>
+  <p>Стек из 10 блоков × 4 подблока каждый, где каждый подблок — Time-Channel-Separable свёртка (depthwise 1D + pointwise 1×1 + BN + ReLU + Dropout). TCS даёт почти качество обычной свёртки за четверть параметров. Единственное понижение временной оси — в прологе (stride=2). Нет attention, нет RNN — чистый CTC-friendly 1D-stack.</p>
+  <p><strong>Бюджет:</strong> ~4.35M параметров. <strong>Subsample factor:</strong> 2 (жёстко).</p>
+</div>
+
+<h4>Пошаговая трассировка</h4>
+<div class="trace">
+  <div class="step input">[1]</div><div class="op">log-mel (вход)</div><div class="shape">[1, 80, 201]</div>
+  <div class="step conv">[2]</div><div class="op">Prologue TCSConv(80→256, k=33, <strong>stride=2</strong>)</div><div class="shape">[1, 256, 101]</div>
+  <div class="step conv">[3]</div><div class="op">Block B1 — 4× TCSConv(256→256, k=33)</div><div class="shape">[1, 256, 101]</div>
+  <div class="step conv">[4]</div><div class="op">Block B2 — 4× TCSConv(256→256, k=39)</div><div class="shape">[1, 256, 101]</div>
+  <div class="step tap">[T]</div><div class="op"><strong>Tap: intermediate = transpose(B2_out)</strong></div><div class="shape">[1, 101, 256]</div>
+  <div class="step conv">[5]</div><div class="op">Block B3 — 4× TCSConv(256→512, k=51)</div><div class="shape">[1, 512, 101]</div>
+  <div class="step conv">[6]</div><div class="op">Block B4 — 4× TCSConv(512→512, k=63)</div><div class="shape">[1, 512, 101]</div>
+  <div class="step conv">[7]</div><div class="op">Block B5 — 4× TCSConv(512→512, k=75)</div><div class="shape">[1, 512, 101]</div>
+  <div class="step conv">[8]</div><div class="op">Epilogue TCSConv(512→512, k=87, dilation=2)</div><div class="shape">[1, 512, 101]</div>
+  <div class="step head">[9]</div><div class="op">Head Conv1d(512→35, k=1)</div><div class="shape">[1, 35, 101]</div>
+  <div class="step output">[10]</div><div class="op">log_softmax(dim=1) + transpose</div><div class="shape">[1, 101, 35]</div>
+</div>
+
+<div class="formula">output_lengths = ceil(mel_lengths / 2) = (mel_lengths + 1) // 2</div>
+
+<div class="card tap">
+  <h4>Что такое "intermediate" и зачем он</h4>
+  <p>На середине глубины (после B2, 40% пути) мы достаём <em>промежуточное</em> представление. Оно уже кодирует акустику, но ещё не "дошло" до финальной классификации. Для базового обучения эта промежуточка не используется — её видит только InterCTC-голова в эксперименте <code>01a</code> (секция 8.1 ниже).</p>
+</div>
+
+<h4>Что делает один TCSConv-подблок</h4>
+<pre><code>x              : [B, C=256, T=101]
+  ├─ depthwise Conv1d (C → C, kernel=33, groups=C)  ← обрабатывает только время, канал в канал
+  │   → [B, 256, 101]
+  ├─ pointwise Conv1d (C → C, kernel=1)             ← микширует каналы, не трогает время
+  │   → [B, 256, 101]
+  ├─ BatchNorm1d
+  ├─ (+ residual если c_in == c_out и stride == 1)
+  ├─ ReLU
+  └─ Dropout
+  → [B, 256, 101]</code></pre>
+
+<p><strong>Ключ:</strong> depthwise отделяет работу "по времени" от работы "по каналам" — parameters = k·C + C² вместо k·C·C у обычной Conv1d.</p>
+
+<!-- ============================================================ -->
+<h2 id="crdnn">4. CRDNN — Conv2D + BiGRU</h2>
+
+<div class="card">
+  <h4>Идея</h4>
+  <p>Две 2D-свёртки на (freq, time) → разворачиваем в [B, T, feat] → BiGRU → линейная голова. Conv2D-фронтенд <strong>сжимает частотную ось</strong> вдвое дважды (80 → 40 → 20), не трогая время (при <code>subsample_factor=1</code>). BiGRU моделирует долговременные зависимости через рекуррентность в обе стороны.</p>
+  <p><strong>Бюджет:</strong> ~4.9M параметров при d_cnn=64, rnn_hidden=256, rnn_layers=2. <strong>Subsample factor:</strong> 1 или 2.</p>
+</div>
+
+<h4>Пошаговая трассировка (subsample_factor=1)</h4>
+<div class="trace">
+  <div class="step input">[1]</div><div class="op">log-mel (вход)</div><div class="shape">[1, 80, 201]</div>
+  <div class="step conv">[2]</div><div class="op">unsqueeze(1) — добавляем канал</div><div class="shape">[1, 1, 80, 201]</div>
+  <div class="step conv">[3]</div><div class="op">Conv2d(1→64, k=3, <strong>stride=(2,1)</strong>) + BN + ReLU + Dropout</div><div class="shape">[1, 64, 40, 201]</div>
+  <div class="step conv">[4]</div><div class="op">Conv2d(64→64, k=3, <strong>stride=(2,1)</strong>) + BN + ReLU + Dropout</div><div class="shape">[1, 64, 20, 201]</div>
+  <div class="step ffn">[5]</div><div class="op">permute(0,3,1,2).reshape — flatten freq×channels</div><div class="shape">[1, 201, 1280]</div>
+  <div class="step rnn">[6]</div><div class="op">BiGRU(1280 → 256×2, 2 слоя, bidirectional)</div><div class="shape">[1, 201, 512]</div>
+  <div class="step ffn">[7]</div><div class="op">LayerNorm + Dropout</div><div class="shape">[1, 201, 512]</div>
+  <div class="step head">[8]</div><div class="op">Linear(512 → 35)</div><div class="shape">[1, 201, 35]</div>
+  <div class="step output">[9]</div><div class="op">.float() + log_softmax(dim=-1)</div><div class="shape">[1, 201, 35]</div>
+</div>
+
+<div class="formula">T' = ceil(T_mel / subsample_factor);  при s=1: T' == T_mel</div>
+
+<div class="note">
+  <strong>Почему Conv2D, а не 1D:</strong> трактовка (freq, time) как 2D-картинки позволяет свёртке "смотреть" сразу в локальное окно по обеим осям. Classic SpeechBrain/ESPnet паттерн. При этом <strong>время не трогаем</strong> — stride только по частоте. BiGRU не любит короткие последовательности и даёт лучший effective receptive field при полном T.
+</div>
+
+<h4>Что делает BiGRU</h4>
+<p>GRU — gated recurrent unit. На каждом шаге <code>t</code> принимает <code>x_t</code> и предыдущее состояние <code>h_{t-1}</code>, через update-gate и reset-gate вычисляет новое <code>h_t</code>. Bidirectional = два GRU (прямой и обратный), их выходы конкатенируются по каналам. Итого: каждый фрейм на выходе видит весь контекст до и после себя.</p>
+
+<!-- ============================================================ -->
+<h2 id="efficient">5. Efficient Conformer — progressive downsample</h2>
+
+<div class="card">
+  <h4>Идея</h4>
+  <p>Conformer (macaron-FFN → MHSA → Conv module → macaron-FFN) — стандарт современного ASR. Обычный Conformer дорог: self-attention стоит O(T²). Efficient Conformer (Burchi & Vielzeuf 2021) делит блоки на <strong>стадии разной временной дискретизации</strong>: stage 1 работает на T/2, между stage 1 и stage 2 — downsample /2, stages 2-3 работают на T/4. Итого attention-cost в 4× меньше, чем "в лоб".</p>
+  <p><strong>Бюджет:</strong> ~4.2M параметров. <strong>Subsample factor:</strong> 4 (жёстко, 2×2).</p>
+</div>
+
+<h4>Пошаговая трассировка</h4>
+<div class="trace">
+  <div class="step input">[1]</div><div class="op">log-mel (вход)</div><div class="shape">[1, 80, 201]</div>
+  <div class="step conv">[2]</div><div class="op">Prologue TCSConv(80→64, k=11, <strong>stride=2</strong>)</div><div class="shape">[1, 64, 101]</div>
+  <div class="step ffn">[3]</div><div class="op">input_conv 1×1 (64→96) + transpose + LayerNorm</div><div class="shape">[1, 101, 96]</div>
+  <div class="step attn">[4]</div><div class="op">Stage 1: 4× ConformerBlock(d=96, heads=4, k=15)</div><div class="shape">[1, 101, 96]</div>
+  <div class="step conv">[5]</div><div class="op">DownsampleBlock — stride-2 Conv1d, 96→128</div><div class="shape">[1, 51, 128]</div>
+  <div class="step attn">[6]</div><div class="op">Stage 2: 4× ConformerBlock(d=128, heads=4, k=15)</div><div class="shape">[1, 51, 128]</div>
+  <div class="step attn">[7]</div><div class="op">Stage 3: 4× ConformerBlock(d=128, heads=4, k=15)</div><div class="shape">[1, 51, 128]</div>
+  <div class="step head">[8]</div><div class="op">Linear(128 → 35)</div><div class="shape">[1, 51, 35]</div>
+  <div class="step output">[9]</div><div class="op">.float() + log_softmax(dim=-1)</div><div class="shape">[1, 51, 35]</div>
+</div>
+
+<div class="formula">T' = ceil(ceil(T_mel / 2) / 2) = ceil(201/2)/2 = 51</div>
+
+<h4>Анатомия одного ConformerBlock</h4>
+<p>Macaron-pattern: две "половинки" FFN с весом 0.5 обрамляют центральные MHSA и Conv module. Все подмодули — с pre-norm и residual connection.</p>
+
+<pre><code>x : [B, T, d_model]
+  │
+  ├─ x = x + 0.5 · FFN1(LayerNorm(x))                    ← macaron half-FFN
+  │        FFN: Linear(d → d·4) → SiLU → Dropout → Linear(d·4 → d) → Dropout
+  │
+  ├─ y = LayerNorm(x)
+  │     attn_out, _ = MultiheadAttention(y, y, y)        ← self-attention
+  │     x = x + Dropout(attn_out)
+  │
+  ├─ x = x + ConvModule(x)                                ← локальный контекст
+  │        LayerNorm → pointwise(d → 2d) → GLU → depthwise(k=15) → BN → SiLU → pointwise(2d → d)
+  │
+  ├─ x = x + 0.5 · FFN2(LayerNorm(x))                    ← вторая macaron half-FFN
+  │
+  └─ LayerNorm(x)
+  → [B, T, d_model]</code></pre>
+
+<p><strong>Зачем так много компонентов:</strong> MHSA ловит глобальные зависимости, ConvModule — локальный контекст, FFN'ы — нелинейную комбинацию признаков. Macaron-паттерн (половина FFN до/после) эмпирически лучше чем одна полная FFN.</p>
+
+<!-- ============================================================ -->
+<h2 id="fast">6. Fast Conformer BPE — subsample ×4 → 16 блоков</h2>
+
+<div class="card">
+  <h4>Идея</h4>
+  <p>Rekesh et al. (2023). Всё просто: один <code>SubsampleConv</code> в начале сжимает время ×4, дальше идёт стек из 16 одинаковых ConformerBlock (без стадий, без промежуточных downsampling). Вся модель работает на <code>T/4</code> фреймах. Единственная в проекте модель на BPE-vocab (256 subwords).</p>
+  <p><strong>Бюджет:</strong> ~4.2M параметров. <strong>Subsample factor:</strong> 4 (жёстко).</p>
+</div>
+
+<h4>Пошаговая трассировка</h4>
+<div class="trace">
+  <div class="step input">[1]</div><div class="op">log-mel (вход)</div><div class="shape">[1, 80, 201]</div>
+  <div class="step conv">[2]</div><div class="op">SubsampleConv factor=4 (две Conv2d stride=2 + Linear 1920→96)</div><div class="shape">[1, 51, 96]</div>
+  <div class="step ffn">[3]</div><div class="op">Dropout(0.1)</div><div class="shape">[1, 51, 96]</div>
+  <div class="step attn">[4]</div><div class="op">16× ConformerBlock(d=96, heads=4, k=9)</div><div class="shape">[1, 51, 96]</div>
+  <div class="step head">[5]</div><div class="op">Linear(96 → 257) — vocab = 256 BPE + 1 blank</div><div class="shape">[1, 51, 257]</div>
+  <div class="step output">[6]</div><div class="op">.float() + log_softmax(dim=-1)</div><div class="shape">[1, 51, 257]</div>
+</div>
+
+<div class="formula">T' = ceil(ceil(T_mel / 2) / 2) = 51;  Vocab = 257 (BPE-256 + blank)</div>
+
+<h4>Что делает SubsampleConv factor=4</h4>
+<pre><code>mel : [1, 80, 201]
+  unsqueeze(1)          → [1, 1, 80, 201]        # добавляем канал
+  Conv2d(1→96, k=3, s=2)→ [1, 96, 40, 101]       # stride 2 по обеим осям
+  ReLU
+  Conv2d(96→96, k=3, s=2)→ [1, 96, 20, 51]       # stride 2 по обеим
+  ReLU
+  permute+reshape       → [1, 51, 96·20=1920]    # flatten (freq × channels)
+  Linear(1920 → 96)     → [1, 51, 96]            # проекция в d_model</code></pre>
+
+<h4>Зачем BPE-vocab</h4>
+<p>Для char-модели целевой токен — одна русская буква. Для BPE-256 — subword (часто целая морфема или даже короткое слово): <em>"тысяч"</em>, <em>"▁три"</em>, <em>"▁сто"</em> могут быть единым токеном. BPE-последовательность в 2-3× короче char-последовательности для того же текста, что даёт запас <code>T'/U_max</code> при тех же subsample=4. Decoding: <code>BPEVocab.decode(ids) → text → words_to_digits(text)</code>.</p>
+
+<!-- ============================================================ -->
+<h2 id="ctc">7. Как работает CTC-loss</h2>
+
+<div class="card">
+  <p><strong>Проблема:</strong> модель выдаёт <code>T'</code> кадров, а таргет — <code>U</code> символов, и алайнмент между ними неизвестен. У Russian "999999" целых 44 символа, а у 2-секундного аудио только 51 выход.</p>
+  <p><strong>Решение CTC:</strong> добавляем специальный <em>blank</em>-токен, разрешаем повторы символов, и усредняем по всем валидным алайнментам автоматически. В итоге loss равен <code>-log(P(target | audio))</code>, где <code>P</code> — сумма по всем путям (алгоритм forward-backward).</p>
+</div>
+
+<div class="formula">
+  loss = -log(P(y | x))<br>
+  P(y | x) = Σ_{π ∈ A(y)} P(π | x),  где A(y) — все CTC-алайнменты для target y
+</div>
+
+<p><strong>Инвариант:</strong> <code>T' &gt;= 2 · U_max</code>. Если <code>T'</code> меньше, алгоритм forward-backward возвращает -inf — модель <em>никогда</em> не научится. Отсюда жёсткие ограничения на <code>subsample_factor</code> в каждой модели.</p>
+
+<p><strong>Fp32 island:</strong> в Trainer forward модели идёт в <code>autocast(dtype=fp16)</code> для скорости, но вызов <code>ctc_loss(log_probs.float(), ...)</code> обёрнут в <code>autocast(enabled=False)</code>. Причина: CTC forward-backward в fp16 нестабилен, даёт NaN на длинных сэмплах.</p>
+
+<!-- ============================================================ -->
+<h2 id="experiments">8. Эксперименты: InterCTC, CR-CTC, WordAux</h2>
+
+<p>Три техники, которые можно опционально подключать к основному CTC-обучению. Все три живут inline в ноутбуках <code>notebooks/experiments/</code>, не в <code>src/</code> — потому что каждая требует специфичного изменения training loop. Общая идея одна: <strong>добавить вторую loss с весом, чтобы регуляризовать основную CTC-задачу</strong>.</p>
+
+<h3 id="inter-ctc">8.1. InterCTC — вспомогательная CTC на промежуточном слое</h3>
+
+<div class="card">
+  <h4>Что</h4>
+  <p>Поставить <em>вторую</em> CTC-loss на представления с <strong>середины</strong> энкодера, не только на финальном выходе. Заставляем внутренние слои тоже "знать" о целевом тексте, а не только последний слой.</p>
+  <p>Paper: Lee &amp; Watanabe 2020 "Intermediate Loss Regularization for CTC-Based Speech Recognition".</p>
+</div>
+
+<h4>Где подключается в QuartzNet</h4>
+<p>У QuartzNet есть tap после блока B2 — он экспонируется как <code>EncoderOutput.intermediate</code> формы <code>[B, 101, 256]</code>. Ноутбук <code>01a_quartznet_inter_ctc.ipynb</code> определяет inline-класс:</p>
+
+<pre><code>class InterCTCHead(nn.Module):
+    def __init__(self, d_mid: int, vocab_size: int, blank_id: int = 0):
+        super().__init__()
+        self.proj = nn.Linear(d_mid, vocab_size)  # 256 → 35
+        self.ctc = nn.CTCLoss(blank=blank_id, reduction="mean", zero_infinity=True)
+
+    def forward(self, mid_features, input_lengths, targets, target_lengths):
+        logits = self.proj(mid_features.float())         # [B, T', V]
+        log_probs = F.log_softmax(logits, dim=-1)
+        return self.ctc(log_probs.transpose(0,1), targets, input_lengths, target_lengths)</code></pre>
+
+<h4>Как меняется training loop</h4>
+<div class="trace">
+  <div class="step input">[1]</div><div class="op">out = model(mel, mel_lengths)  →  out.log_probs + out.intermediate</div><div class="shape">logp: [B, 101, 35]<br>inter: [B, 101, 256]</div>
+  <div class="step head">[2]</div><div class="op">loss_main = ctc(log_probs, targets, …)</div><div class="shape">scalar</div>
+  <div class="step tap">[3]</div><div class="op">loss_inter = inter_head(out.intermediate, …)</div><div class="shape">scalar</div>
+  <div class="step ffn">[4]</div><div class="op">loss = loss_main + <strong>weight · loss_inter</strong>  (weight=0.3)</div><div class="shape">scalar</div>
+  <div class="step output">[5]</div><div class="op">loss.backward()</div><div class="shape">—</div>
+</div>
+
+<p><strong>Почему работает:</strong> градиент от второй CTC усиливает обучение нижних слоёв и действует как регуляризация — модель не может "откладывать всю работу" на последние блоки.</p>
+
+<h3 id="cr-ctc">8.2. CR-CTC — consistency regularization</h3>
+
+<div class="card">
+  <h4>Что</h4>
+  <p>Пропустить один и тот же сэмпл через модель <strong>дважды</strong> с разными аугментациями. Модель должна давать похожие распределения над токенами — штрафуем за расхождение через симметричный KL.</p>
+  <p>Суть: <em>"Твоё предсказание не должно зависеть от того, какой SpecAug-маской я тебя накрыл"</em>.</p>
+</div>
+
+<h4>Математика</h4>
+<div class="formula">
+  loss_cr = ½ · [ KL(p_a || p_b) + KL(p_b || p_a) ]<br>
+  где p_a, p_b — log_probs для view 1 и view 2 одного и того же аудио<br>
+  (с маскированием по input_lengths и min_prob floor для численной стабильности)
+</div>
+
+<h4>Где подключается</h4>
+<p>Ноутбук <code>01c_quartznet_cr_ctc.ipynb</code>. Упрощённо view 2 делается на mel-уровне вторым <code>SpecAugmenter</code> с другим seed:</p>
+
+<div class="trace">
+  <div class="step input">[1]</div><div class="op">mel_v1 = spec_aug1(mel_extractor(audio), lengths)</div><div class="shape">[B, 80, T_mel]</div>
+  <div class="step input">[2]</div><div class="op">mel_v2 = spec_aug2(mel_extractor(audio), lengths)  ← другая маска</div><div class="shape">[B, 80, T_mel]</div>
+  <div class="step attn">[3]</div><div class="op">out_a = model(mel_v1, …)</div><div class="shape">logp: [B, T', V]</div>
+  <div class="step attn">[4]</div><div class="op">out_b = model(mel_v2, …)</div><div class="shape">logp: [B, T', V]</div>
+  <div class="step head">[5]</div><div class="op">loss_main_a = ctc(out_a, targets, …) <br>loss_main_b = ctc(out_b, targets, …)</div><div class="shape">scalars</div>
+  <div class="step tap">[6]</div><div class="op">loss_cr = CRCTCLoss()(out_a.log_probs, out_b.log_probs, out_a.output_lengths)</div><div class="shape">scalar</div>
+  <div class="step ffn">[7]</div><div class="op">loss = ½(loss_main_a + loss_main_b) + <strong>weight · loss_cr</strong></div><div class="shape">scalar</div>
+  <div class="step output">[8]</div><div class="op">loss.backward()</div><div class="shape">—</div>
+</div>
+
+<p><strong>Почему работает:</strong> регуляризация смягчает переобучение на конкретных аугментационных паттернах. Модель учится <em>устойчивому</em> распределению вместо запоминания тренировочного набора масок.</p>
+
+<h3 id="word-aux">8.3. WordAux — вспомогательная CTC на уровне слов</h3>
+
+<div class="card">
+  <h4>Что</h4>
+  <p>Параллельно с основной char-CTC (выход в символы) добавить <strong>вторую CTC-голову, которая предсказывает номерные слова русского</strong> ("один", "два", ..., "тысяча"). Итого модель учится одновременно воспроизводить буквы <em>и</em> слова.</p>
+  <p>Паттерн "auxiliary target" из multi-task learning — приближает к нужной семантике (слова-числительные ограничены <code>NUMBER_WORDS</code>, 42 штуки).</p>
+</div>
+
+<h4>Ingredient 1: inline WordVocab</h4>
+<p>Закрытый словарь из 42 русских числительных: <em>"ноль", "один", "одна", "два", "две", ..., "тысяча", "тысячи", "тысяч"</em>. Blank = id 0, остальные 1..42.</p>
+
+<h4>Ingredient 2: inline _encode_words</h4>
+<pre><code>def _encode_words(trans_list, wvocab):
+    encoded = [wvocab.encode(digits_to_words(t)) for t in trans_list]
+    # "139473" → "сто тридцать девять тысяч четыреста семьдесят три"
+    #         → [id_сто, id_тридцать, id_девять, id_тысяч, id_четыреста, id_семьдесят, id_три]
+    lengths = torch.tensor([len(e) for e in encoded], dtype=torch.int64)
+    U = max(lengths.max().item(), 1)
+    tensor = torch.zeros(len(encoded), U, dtype=torch.int64)
+    for i, e in enumerate(encoded):
+        tensor[i, :len(e)] = torch.tensor(e, dtype=torch.int64)
+    return tensor, lengths</code></pre>
+
+<h4>Ingredient 3: WordAuxCTCHead</h4>
+<pre><code>class WordAuxCTCHead(nn.Module):
+    def __init__(self, d_enc: int, word_vocab_size: int, blank_id: int = 0):
+        super().__init__()
+        self.proj = nn.Linear(d_enc, word_vocab_size)  # 256 → 43
+        self.ctc = nn.CTCLoss(blank=blank_id, reduction="mean", zero_infinity=True)
+
+    def forward(self, enc_features, input_lengths, word_targets, word_tlens):
+        logits = self.proj(enc_features.float())
+        log_probs = F.log_softmax(logits, dim=-1)
+        return self.ctc(log_probs.transpose(0,1), word_targets, input_lengths, word_tlens)</code></pre>
+
+<h4>Как меняется training loop</h4>
+<div class="trace">
+  <div class="step input">[1]</div><div class="op">out = model(mel, mel_lengths)</div><div class="shape">logp: [B, 101, 35]<br>inter: [B, 101, 256]</div>
+  <div class="step head">[2]</div><div class="op">loss_main = ctc(out.log_probs, char_targets, …)</div><div class="shape">scalar</div>
+  <div class="step tap">[3]</div><div class="op">word_t, word_len = _encode_words(batch.transcriptions, word_vocab)</div><div class="shape">[B, U_w], [B]</div>
+  <div class="step tap">[4]</div><div class="op">loss_word = word_head(out.intermediate, out.output_lengths, word_t, word_len)</div><div class="shape">scalar</div>
+  <div class="step ffn">[5]</div><div class="op">loss = loss_main + <strong>weight · loss_word</strong></div><div class="shape">scalar</div>
+  <div class="step output">[6]</div><div class="op">loss.backward()</div><div class="shape">—</div>
+</div>
+
+<p><strong>Ключевое отличие от InterCTC:</strong> обе головы пишут в <em>разные</em> словари. Char-head = 35 букв, Word-head = 43 числительных. При inference используется только char-head.</p>
+
+<h3>Общий шаблон всех трёх экспериментов</h3>
+<div class="formula">
+  loss_total = loss_main_ctc + <em>λ</em> · loss_auxiliary<br>
+  ↓ .backward()<br>
+  обе головы обновляются одновременно, но при inference используется только main<br>
+  <br>
+  λ (вес вспомогательной loss) — гиперпараметр. Типичные значения: 0.1 – 0.5
+</div>
+
+<!-- ============================================================ -->
+<h2 id="cheatsheet">9. Шпаргалка</h2>
+
+<table>
+  <thead>
+    <tr>
+      <th>Модель</th>
+      <th>Subsample</th>
+      <th>Vocab</th>
+      <th>Выход для 2 с аудио</th>
+      <th>Ключевые слои</th>
+      <th>Оптимизатор</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>QuartzNet 10x4</strong></td>
+      <td>×2</td>
+      <td>char-35</td>
+      <td><code>[1, 101, 35]</code></td>
+      <td>10 блоков × 4 TCS-подблока + dilated epilogue</td>
+      <td>NovoGrad + Cosine warmup</td>
+    </tr>
+    <tr>
+      <td><strong>CRDNN</strong></td>
+      <td>×1 (or ×2)</td>
+      <td>char-35</td>
+      <td><code>[1, 201, 35]</code></td>
+      <td>2× Conv2D stride=(2,1) + 2-слойный BiGRU-256</td>
+      <td>AdamW + Cosine warmup</td>
+    </tr>
+    <tr>
+      <td><strong>Efficient Conformer</strong></td>
+      <td>×4</td>
+      <td>char-35</td>
+      <td><code>[1, 51, 35]</code></td>
+      <td>TCS prologue /2 + 4 ConfBlock@96 + /2 + 8 ConfBlock@128</td>
+      <td>AdamW + Noam warmup</td>
+    </tr>
+    <tr>
+      <td><strong>Fast Conformer BPE</strong></td>
+      <td>×4</td>
+      <td>BPE-257</td>
+      <td><code>[1, 51, 257]</code></td>
+      <td>SubsampleConv /4 + 16× ConfBlock@96, k=9</td>
+      <td>AdamW + Noam warmup</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>Формулы выходной длины</h3>
+<pre><code>QuartzNet 10x4      : T' = ceil(T_mel / 2)             = (T_mel + 1) // 2
+CRDNN (s=1)         : T' = T_mel                       # время не трогаем
+CRDNN (s=2)         : T' = ceil(T_mel / 2)             = (T_mel + 1) // 2
+Efficient Conformer : T' = ceil(ceil(T_mel / 2) / 2)   # два stride-2 шага
+Fast Conformer BPE  : T' = ceil(ceil(T_mel / 2) / 2)   # SubsampleConv = 2 × stride-2</code></pre>
+
+<h3>Эксперименты — когда и зачем</h3>
+<table>
+  <thead>
+    <tr>
+      <th>Техника</th>
+      <th>Когда полезна</th>
+      <th>Стоимость</th>
+      <th>Где живёт</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>InterCTC</strong></td>
+      <td>Модель сходится медленно или overfits на финальных слоях</td>
+      <td>+0 параметров к энкодеру, +linear-projection, +CTC вызов</td>
+      <td><code>01a_quartznet_inter_ctc.ipynb</code></td>
+    </tr>
+    <tr>
+      <td><strong>CR-CTC</strong></td>
+      <td>Высокая вариативность аугментаций → модель "цепляется" за конкретные маски</td>
+      <td>×2 forward pass + KL на каждом батче</td>
+      <td><code>01c_quartznet_cr_ctc.ipynb</code></td>
+    </tr>
+    <tr>
+      <td><strong>WordAux</strong></td>
+      <td>Задача с закрытой семантикой (числительные, команды), char-ошибки разрушают всё слово</td>
+      <td>+linear-projection 256→43, +CTC вызов, +on-the-fly word encoding</td>
+      <td><code>01b_quartznet_word_aux.ipynb</code></td>
+    </tr>
+    <tr>
+      <td><strong>KenLM + beam rescore</strong></td>
+      <td>После обучения — улучшение greedy на inference (только CharVocab)</td>
+      <td>0 во время обучения, +ms/сэмпл на inference</td>
+      <td><code>06_kenlm_beam_rescore.ipynb</code></td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>Пара цифр для интуиции</h3>
+<dl class="kv">
+  <dt>Сэмпл 2 с, 16 kHz</dt>   <dd>32 000 сэмплов → 201 mel-кадр</dd>
+  <dt>Сэмпл 3.5 с (макс)</dt>  <dd>56 000 сэмплов → 351 mel-кадр</dd>
+  <dt>U_max для char</dt>      <dd>~59 символов (макс для "999999" в русских словах)</dd>
+  <dt>U_max для BPE-256</dt>   <dd>~30 subword-токенов (BPE короче ~2×)</dd>
+  <dt>CTC инвариант</dt>       <dd>T' ≥ 2·U_max для сходимости</dd>
+</dl>
+
+<p class="small">Сгенерировано 2026-04-23 из исходников в <code>src/gp1/models/</code>, <code>src/gp1/features/melbanks.py</code> и ноутбуков <code>notebooks/experiments/</code>.</p>
+
+</body>
+</html>

@@ -17,14 +17,38 @@ from gp1.text.normalize import digits_to_words
 
 # Stratified sample — touches every decimal band and boundary condition.
 _STRATA: tuple[int, ...] = (
-    1000, 1001, 1005, 1010, 1100, 1234, 1999,
-    2000, 2001, 2025, 2100,
-    9999, 10000, 10001, 10500,
-    12345, 21001, 21021,
-    99999, 100000, 100001, 100025,
-    123456, 139473, 250000,
-    500000, 500500, 555555,
-    700000, 888888, 999000, 999999,
+    1000,
+    1001,
+    1005,
+    1010,
+    1100,
+    1234,
+    1999,
+    2000,
+    2001,
+    2025,
+    2100,
+    9999,
+    10000,
+    10001,
+    10500,
+    12345,
+    21001,
+    21021,
+    99999,
+    100000,
+    100001,
+    100025,
+    123456,
+    139473,
+    250000,
+    500000,
+    500500,
+    555555,
+    700000,
+    888888,
+    999000,
+    999999,
 )
 
 
@@ -46,16 +70,15 @@ def test_digits_to_words_accepts_string_input() -> None:
     assert out == "одна тысяча пять"
 
 
-def test_digits_to_words_rejects_below_1000() -> None:
-    # Arrange / Act / Assert
-    with pytest.raises(ValueError):
-        digits_to_words(999)
+def test_digits_to_words_accepts_below_1000() -> None:
+    # Real train data contains 14, 19, 61, 355, ... — must work.
+    assert digits_to_words(19) == "девятнадцать"
+    assert digits_to_words(61) == "шестьдесят один"
 
 
-def test_digits_to_words_rejects_above_999999() -> None:
-    # Arrange / Act / Assert
+def test_digits_to_words_rejects_negative() -> None:
     with pytest.raises(ValueError):
-        digits_to_words(1_000_000)
+        digits_to_words(-1)
 
 
 def test_digits_to_words_rejects_malformed_string() -> None:
