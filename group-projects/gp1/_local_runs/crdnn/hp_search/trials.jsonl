@@ -1,2 +1,0 @@
-{"trial_id": 0, "params": {"lr": 0.0012200200009846104, "dropout": 0.05500215104453339, "warmup_steps": 2753, "grad_clip_norm": 1.0, "specaug_time_mask_param": 25}, "best_val_cer": Infinity}
-{"trial_id": 1, "params": {"lr": 0.00017261190875085937, "dropout": 0.07049903523430151, "warmup_steps": 6567, "grad_clip_norm": 0.5, "specaug_time_mask_param": 50}, "best_val_cer": Infinity}
