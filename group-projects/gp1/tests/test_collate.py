@@ -6,13 +6,9 @@ AAA (Arrange-Act-Assert) pattern throughout.
 
 from __future__ import annotations
 
-from pathlib import Path
-
-import numpy as np
-import pytest
 import torch
 
-from gp1.data.collate import DynamicBucketSampler, collate_fn
+from gp1.data.collate import collate_fn
 from gp1.types import Batch
 
 
@@ -75,7 +71,8 @@ class TestCollateFn:
         # Arrange
         lengths = [100, 250, 310]
         items = [
-            _make_item(audio_len=l, target_len=5, idx=i) for i, l in enumerate(lengths)
+            _make_item(audio_len=length, target_len=5, idx=i)
+            for i, length in enumerate(lengths)
         ]
 
         # Act
@@ -104,8 +101,8 @@ class TestCollateFn:
         # Arrange
         target_lens = [3, 7, 5]
         items = [
-            _make_item(audio_len=160, target_len=l, idx=i)
-            for i, l in enumerate(target_lens)
+            _make_item(audio_len=160, target_len=tlen, idx=i)
+            for i, tlen in enumerate(target_lens)
         ]
 
         # Act
@@ -208,168 +205,3 @@ class TestCollateFn:
         assert batch.audio.shape[0] == 1
         assert batch.targets.shape[0] == 1
         assert len(batch.spk_ids) == 1
-
-
-# ---------------------------------------------------------------------------
-# DynamicBucketSampler tests
-# ---------------------------------------------------------------------------
-
-
-class TestDynamicBucketSampler:
-    def test_every_batch_within_token_budget(self) -> None:
-        """Every yielded batch has sum(lengths) <= max_tokens_per_batch."""
-        # Arrange
-        lengths = [100, 200, 300, 400, 500]
-        max_tokens = 600
-
-        sampler = DynamicBucketSampler(
-            lengths=lengths,
-            max_tokens_per_batch=max_tokens,
-            num_buckets=2,
-            shuffle=False,
-        )
-
-        # Act
-        batches = list(sampler)
-
-        # Assert
-        assert len(batches) > 0, "Sampler yielded no batches"
-        for batch_indices in batches:
-            batch_sum = sum(lengths[i] for i in batch_indices)
-            assert batch_sum <= max_tokens, (
-                f"Batch {batch_indices} has token sum {batch_sum} > {max_tokens}"
-            )
-
-    def test_all_indices_covered_exactly_once(self) -> None:
-        """Every index appears exactly once across all batches."""
-        # Arrange
-        lengths = [100, 200, 150, 300, 250, 400, 350, 500]
-        sampler = DynamicBucketSampler(
-            lengths=lengths,
-            max_tokens_per_batch=700,
-            num_buckets=3,
-            shuffle=False,
-        )
-
-        # Act
-        all_indices = []
-        for batch in sampler:
-            all_indices.extend(batch)
-
-        # Assert
-        assert sorted(all_indices) == list(range(len(lengths))), (
-            f"Expected each index 0..{len(lengths) - 1} exactly once, "
-            f"got: {sorted(all_indices)}"
-        )
-
-    def test_same_seed_produces_identical_order(self) -> None:
-        """Two samplers with the same seed yield identical batch sequences."""
-        # Arrange
-        lengths = [100, 200, 300, 400, 500, 150, 250, 350]
-        kwargs = dict(
-            lengths=lengths, max_tokens_per_batch=600, num_buckets=3, shuffle=True
-        )
-
-        sampler_a = DynamicBucketSampler(**kwargs)
-        sampler_a._seed = 42
-        sampler_b = DynamicBucketSampler(**kwargs)
-        sampler_b._seed = 42
-
-        # Act
-        batches_a = list(sampler_a)
-        batches_b = list(sampler_b)
-
-        # Assert
-        assert batches_a == batches_b, "Same seed should produce identical batch order"
-
-    def test_different_seeds_produce_different_order(self) -> None:
-        """Two samplers with different seeds should (very likely) yield different orders."""
-        # Arrange
-        lengths = list(range(100, 600, 50))  # 10 lengths
-        kwargs = dict(
-            lengths=lengths, max_tokens_per_batch=500, num_buckets=3, shuffle=True
-        )
-
-        sampler_a = DynamicBucketSampler(**kwargs)
-        sampler_a._seed = 0
-        sampler_b = DynamicBucketSampler(**kwargs)
-        sampler_b._seed = 999
-
-        # Act
-        batches_a = list(sampler_a)
-        batches_b = list(sampler_b)
-
-        # Assert — with 10 lengths this almost certainly differs
-        assert batches_a != batches_b, (
-            "Different seeds should (almost certainly) produce different batch orders"
-        )
-
-    def test_len_returns_number_of_batches(self) -> None:
-        """__len__ returns the number of batches that __iter__ would yield."""
-        # Arrange
-        lengths = [100, 200, 300, 400, 500]
-        sampler = DynamicBucketSampler(
-            lengths=lengths,
-            max_tokens_per_batch=600,
-            num_buckets=2,
-            shuffle=False,
-        )
-
-        # Act
-        declared_len = len(sampler)
-        actual_len = len(list(sampler))
-
-        # Assert
-        assert declared_len == actual_len, (
-            f"__len__ returned {declared_len} but iter yielded {actual_len} batches"
-        )
-
-    def test_empty_lengths_raises_or_yields_nothing(self) -> None:
-        """Empty lengths list: sampler yields no batches."""
-        # Arrange & Act
-        sampler = DynamicBucketSampler(
-            lengths=[],
-            max_tokens_per_batch=1000,
-            num_buckets=5,
-            shuffle=False,
-        )
-
-        # Assert
-        batches = list(sampler)
-        assert batches == [], f"Expected no batches, got {batches}"
-
-    def test_single_item_too_large_still_included(self) -> None:
-        """A single item whose length exceeds max_tokens still appears as a 1-item batch."""
-        # Arrange — single item larger than budget
-        lengths = [1000]
-        sampler = DynamicBucketSampler(
-            lengths=lengths,
-            max_tokens_per_batch=500,
-            num_buckets=1,
-            shuffle=False,
-        )
-
-        # Act
-        batches = list(sampler)
-
-        # Assert
-        assert len(batches) == 1
-        assert batches[0] == [0]
-
-    def test_shuffle_false_no_seed_required(self) -> None:
-        """shuffle=False produces a deterministic order without needing _seed."""
-        # Arrange
-        lengths = [300, 100, 200, 400, 150]
-        sampler = DynamicBucketSampler(
-            lengths=lengths,
-            max_tokens_per_batch=600,
-            num_buckets=2,
-            shuffle=False,
-        )
-
-        # Act — two iterations should yield identical results
-        run1 = list(sampler)
-        run2 = list(sampler)
-
-        # Assert
-        assert run1 == run2

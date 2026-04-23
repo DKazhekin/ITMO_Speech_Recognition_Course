@@ -86,3 +86,61 @@ Please keep in mind that samplerate and file extension are not constant across a
 - [Kaggle copmetition submission page](https://www.kaggle.com/competitions/asr-2026-spoken-numbers-recognition-challenge/overview)
 - For text normalization and denormalization you can use [NeMo toolkit](https://github.com/NVIDIA/NeMo-text-processing/blob/main/tutorials/Text_(Inverse)_Normalization.ipynb) or [num2words](https://pypi.org/project/num2words/) library
 - Making models smaller and more efficient with [different types of convolutions](https://animatedai.github.io/)
+
+---
+
+## Codebase layout (implementation)
+
+```
+src/gp1/               # Reusable, architecture-neutral library
+├── env.py             # setup_environment() -> (Paths, device); local/colab/kaggle detection
+├── types.py           # ManifestRecord, Batch, AugConfig
+├── data/              # manifest, dataset, collate, audio_aug, spec_aug
+├── features/          # LogMelFilterBanks
+├── text/              # CharVocab, BPEVocab, digits<->words normalize/denormalize
+├── losses/            # CTCLoss (the only in-library loss)
+├── decoding/          # greedy_decode; optional BeamSearchDecoder (pyctcdecode+KenLM)
+├── lm/                # build_synthetic_corpus, train_kenlm
+├── models/            # QuartzNet10x4, CRDNN, EfficientConformer, FastConformerBPE + common blocks
+├── train/             # slim Trainer (tqdm, fp16 autocast, grad accum, early stop), checkpoint save/load, metrics, optim, schedulers
+└── submit/            # inference_utils: build_test_dataloader, write_submission
+
+notebooks/
+├── 01_quartznet.ipynb               # HP random search + train (NovoGrad + cosine)
+├── 02_crdnn.ipynb                   # (AdamW + cosine)
+├── 03_efficient_conformer.ipynb     # (AdamW + Noam, s=4)
+├── 04_fast_conformer_bpe.ipynb      # (BPE-256 + Noam)
+├── 05_predict.ipynb                 # load best checkpoint → submission.csv
+└── experiments/
+    ├── 01a_quartznet_inter_ctc.ipynb     # inline InterCTCHead + raw training loop
+    ├── 01b_quartznet_word_aux.ipynb      # inline WordVocab + WordAuxCTCHead
+    ├── 01c_quartznet_cr_ctc.ipynb        # inline CRCTCLoss with two SpecAug views
+    └── 06_kenlm_beam_rescore.ipynb       # train KenLM + beam rescore
+
+tests/                 # Reusable-core tests only (data, features, vocab, losses/ctc, models, trainer, decoding, metrics)
+pyproject.toml         # uv-managed, Python 3.11, torch 2.5.1 + deps
+```
+
+## Workflow
+
+1. **Setup.** `uv sync` (local) — dependencies.
+2. **Pick an architecture.** Open one of the four main notebooks (`01_quartznet` / `02_crdnn` / `03_efficient_conformer` / `04_fast_conformer_bpe`). Each notebook is a complete, step-by-step pipeline: data → vocab → model → trainer → HP random search → best checkpoint.
+3. **Tune HPs.** Each notebook starts with two dicts:
+   - `FIXED` — audio/batching params you don't vary per trial.
+   - `HP_GRID` — axes to randomize (lr, dropout, SpecAug, augmentation probs, ...).
+   - `N_TRIALS` — how many random configurations to try.
+4. **Run the notebook.** The HP loop saves the best checkpoint per trial under `<ckpt_root>/<run_id>/trial_XX/best.pt` + `meta.json` describing `arch`, `hparams`, `val_cer`.
+5. **Predict.** Open `05_predict.ipynb`, point `CKPT` to any `best.pt`, it rebuilds the matching model and writes `submission.csv`.
+6. **Optional experiments.** `notebooks/experiments/` contains self-contained demos of auxiliary losses (`inter_ctc`, `word_aux`, `cr_ctc`) and a KenLM beam rescore recipe. They keep their extra classes inline — open one and see the whole picture.
+
+## Testing
+
+```
+.venv/bin/python -m pytest tests/ -m "not slow"
+```
+
+Tests cover only architecture-neutral infrastructure (dataset, collate, features, vocab, CTC loss, trainer, decoding, metrics, per-architecture shape contracts). Architecture-specific experiments are validated by running their notebooks.
+
+## Why this layout
+
+Everything architecture-specific (loss heads for InterCTC / CR-CTC / WordAux, model constructors, optimizer choice, scheduler choice) lives in the notebooks — the reader sees the whole pipeline in one file and can step-debug any cell. The `src/` library is intentionally arch-neutral: no `if model_name == ...` branches, no dispatcher, no YAML configs — all hyperparameters are Python constants at the top of each notebook.

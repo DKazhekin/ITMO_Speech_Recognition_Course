@@ -1,44 +1,35 @@
-"""Tests for gp1.data.manifest (CONTRACTS.md §4).
+"""Tests for gp1.data.manifest.
 
-Follows TDD RED->GREEN->REFACTOR. All tests written before implementation.
-AAA (Arrange-Act-Assert) pattern throughout.
+Follows TDD RED->GREEN->REFACTOR. AAA (Arrange-Act-Assert) pattern throughout.
 """
 
 from __future__ import annotations
 
 import csv
-import json
 from pathlib import Path
 
-import numpy as np
 import pytest
 import soundfile as sf
 
+from helpers import write_wav
 from gp1.data.manifest import (
-    build_manifest,
     leave_n_speakers_out_split,
-    read_jsonl,
-    write_jsonl,
+    records_from_csv,
 )
 from gp1.types import ManifestRecord
 
 
 # ---------------------------------------------------------------------------
-# Fixtures
+# Helpers
 # ---------------------------------------------------------------------------
-
-
-def _write_wav(path: Path, samplerate: int, duration_s: float = 0.5) -> None:
-    """Write a silent WAV file at the given sample rate."""
-    n_samples = int(samplerate * duration_s)
-    data = np.zeros(n_samples, dtype=np.float32)
-    sf.write(str(path), data, samplerate)
 
 
 def _make_csv(
     csv_path: Path,
     audio_root: Path,
     rows: list[dict],
+    *,
+    samplerate: int = 16000,
 ) -> None:
     """Write a Kaggle-style CSV and create corresponding WAV files."""
     fieldnames = ["filename", "transcription", "spk_id", "gender"]
@@ -46,11 +37,11 @@ def _make_csv(
         writer = csv.DictWriter(fh, fieldnames=fieldnames)
         writer.writeheader()
         for row in rows:
-            writer.writerow(row)
+            writer.writerow({k: row[k] for k in fieldnames})
             wav_path = audio_root / row["filename"]
             wav_path.parent.mkdir(parents=True, exist_ok=True)
-            sr = row.get("_sr", 16000)
-            _write_wav(wav_path, samplerate=sr)
+            sr = row.get("_sr", samplerate)
+            write_wav(wav_path, samplerate=sr)
 
 
 def _make_record(
@@ -72,18 +63,17 @@ def _make_record(
 
 
 # ---------------------------------------------------------------------------
-# build_manifest tests
+# records_from_csv tests
 # ---------------------------------------------------------------------------
 
 
-class TestBuildManifest:
-    def test_writes_correct_record_count(self, tmp_path: Path) -> None:
-        """build_manifest returns count == number of CSV rows and JSONL has same count."""
+class TestRecordsFromCsv:
+    def test_record_count_matches_csv_rows(self, tmp_path: Path) -> None:
+        """Number of returned records equals the number of CSV data rows."""
         # Arrange
         audio_root = tmp_path / "audio"
         audio_root.mkdir()
         csv_path = tmp_path / "train.csv"
-        out_path = tmp_path / "manifest.jsonl"
         rows = [
             {
                 "filename": "spk_A/001.wav",
@@ -107,20 +97,17 @@ class TestBuildManifest:
         _make_csv(csv_path, audio_root, rows)
 
         # Act
-        count = build_manifest(csv_path, audio_root, out_path)
+        records = records_from_csv(csv_path, audio_root)
 
         # Assert
-        assert count == 3
-        lines = out_path.read_text().strip().splitlines()
-        assert len(lines) == 3
+        assert len(records) == 3
 
-    def test_resolves_absolute_paths(self, tmp_path: Path) -> None:
-        """audio_path in each JSONL record is absolute."""
+    def test_audio_path_is_absolute(self, tmp_path: Path) -> None:
+        """audio_path in each ManifestRecord is absolute."""
         # Arrange
         audio_root = tmp_path / "audio"
         audio_root.mkdir()
         csv_path = tmp_path / "train.csv"
-        out_path = tmp_path / "manifest.jsonl"
         rows = [
             {
                 "filename": "spk_A/001.wav",
@@ -132,28 +119,47 @@ class TestBuildManifest:
         _make_csv(csv_path, audio_root, rows)
 
         # Act
-        build_manifest(csv_path, audio_root, out_path)
+        records = records_from_csv(csv_path, audio_root)
 
         # Assert
-        record_dict = json.loads(out_path.read_text().strip().splitlines()[0])
-        audio_path = Path(record_dict["audio_path"])
-        assert audio_path.is_absolute(), f"Expected absolute path, got {audio_path}"
+        assert records[0].audio_path.is_absolute(), (
+            f"Expected absolute path, got {records[0].audio_path}"
+        )
 
-    def test_reads_native_samplerate(self, tmp_path: Path) -> None:
-        """JSONL samplerate field matches the actual native sample rate of each WAV."""
+    def test_ext_is_lowercase_without_dot(self, tmp_path: Path) -> None:
+        """ext field is lowercase and has no leading dot."""
         # Arrange
         audio_root = tmp_path / "audio"
         audio_root.mkdir()
         csv_path = tmp_path / "train.csv"
-        out_path = tmp_path / "manifest.jsonl"
+        rows = [
+            {
+                "filename": "spk_A/001.wav",
+                "transcription": "10000",
+                "spk_id": "spk_A",
+                "gender": "male",
+            },
+        ]
+        _make_csv(csv_path, audio_root, rows)
 
-        # Create WAVs with different sample rates
+        # Act
+        records = records_from_csv(csv_path, audio_root)
+
+        # Assert
+        assert records[0].ext == "wav"
+        assert not records[0].ext.startswith(".")
+
+    def test_samplerate_matches_native_wav(self, tmp_path: Path) -> None:
+        """samplerate field matches the native sample rate read via sf.info."""
+        # Arrange
+        audio_root = tmp_path / "audio"
+        audio_root.mkdir()
         wav_22k = audio_root / "22k.wav"
         wav_8k = audio_root / "8k.wav"
-        _write_wav(wav_22k, samplerate=22050)
-        _write_wav(wav_8k, samplerate=8000)
+        write_wav(wav_22k, samplerate=22050)
+        write_wav(wav_8k, samplerate=8000)
 
-        # Write CSV manually (rows reference the exact filenames)
+        csv_path = tmp_path / "train.csv"
         fieldnames = ["filename", "transcription", "spk_id", "gender"]
         with open(csv_path, "w", newline="") as fh:
             writer = csv.DictWriter(fh, fieldnames=fieldnames)
@@ -176,24 +182,50 @@ class TestBuildManifest:
             )
 
         # Act
-        build_manifest(csv_path, audio_root, out_path)
+        records = records_from_csv(csv_path, audio_root)
 
         # Assert
-        lines = out_path.read_text().strip().splitlines()
-        records_by_filename = {
-            Path(json.loads(line)["audio_path"]).name: json.loads(line)
-            for line in lines
-        }
-        assert records_by_filename["22k.wav"]["samplerate"] == 22050
-        assert records_by_filename["8k.wav"]["samplerate"] == 8000
+        by_name = {r.audio_path.name: r for r in records}
+        assert by_name["22k.wav"].samplerate == 22050
+        assert by_name["8k.wav"].samplerate == 8000
 
-    def test_stores_correct_metadata_fields(self, tmp_path: Path) -> None:
-        """Each JSONL record has all required ManifestRecord fields."""
+    def test_duration_s_matches_sf_info(self, tmp_path: Path) -> None:
+        """duration_s equals frames / samplerate as reported by sf.info."""
+        # Arrange
+        audio_root = tmp_path / "audio"
+        audio_root.mkdir()
+        wav_path = audio_root / "clip.wav"
+        target_duration = 0.25
+        write_wav(wav_path, samplerate=16000, duration_s=target_duration)
+
+        csv_path = tmp_path / "train.csv"
+        fieldnames = ["filename", "transcription", "spk_id", "gender"]
+        with open(csv_path, "w", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerow(
+                {
+                    "filename": "clip.wav",
+                    "transcription": "10000",
+                    "spk_id": "spk_A",
+                    "gender": "male",
+                }
+            )
+
+        # Act
+        records = records_from_csv(csv_path, audio_root)
+
+        # Assert
+        info = sf.info(str(wav_path))
+        expected_duration = info.frames / info.samplerate
+        assert records[0].duration_s == pytest.approx(expected_duration, rel=1e-5)
+
+    def test_metadata_fields_populated_correctly(self, tmp_path: Path) -> None:
+        """transcription, spk_id, gender are taken verbatim from the CSV row."""
         # Arrange
         audio_root = tmp_path / "audio"
         audio_root.mkdir()
         csv_path = tmp_path / "train.csv"
-        out_path = tmp_path / "manifest.jsonl"
         rows = [
             {
                 "filename": "spk_F/001.wav",
@@ -205,104 +237,36 @@ class TestBuildManifest:
         _make_csv(csv_path, audio_root, rows)
 
         # Act
-        build_manifest(csv_path, audio_root, out_path)
+        records = records_from_csv(csv_path, audio_root)
 
         # Assert
-        record_dict = json.loads(out_path.read_text().strip().splitlines()[0])
-        assert record_dict["transcription"] == "55555"
-        assert record_dict["spk_id"] == "spk_F"
-        assert record_dict["gender"] == "female"
-        assert record_dict["ext"] == "wav"
-        assert "samplerate" in record_dict
-        assert "audio_path" in record_dict
+        r = records[0]
+        assert r.transcription == "55555"
+        assert r.spk_id == "spk_F"
+        assert r.gender == "female"
 
-
-# ---------------------------------------------------------------------------
-# read_jsonl / write_jsonl round-trip tests
-# ---------------------------------------------------------------------------
-
-
-class TestReadWriteJsonl:
-    def test_round_trip_preserves_all_fields(self, tmp_path: Path) -> None:
-        """write_jsonl then read_jsonl returns an equal list of ManifestRecord."""
+    def test_missing_audio_file_raises(self, tmp_path: Path) -> None:
+        """records_from_csv raises an error when an audio file does not exist."""
         # Arrange
-        records = [
-            ManifestRecord(
-                audio_path=tmp_path / "a.wav",
-                transcription="10001",
-                spk_id="spk_A",
-                gender="male",
-                ext="wav",
-                samplerate=16000,
-            ),
-            ManifestRecord(
-                audio_path=tmp_path / "b.wav",
-                transcription="999999",
-                spk_id="spk_B",
-                gender="female",
-                ext="wav",
-                samplerate=22050,
-            ),
-        ]
-        out_path = tmp_path / "manifest.jsonl"
+        audio_root = tmp_path / "audio"
+        audio_root.mkdir()
+        csv_path = tmp_path / "train.csv"
+        fieldnames = ["filename", "transcription", "spk_id", "gender"]
+        with open(csv_path, "w", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerow(
+                {
+                    "filename": "missing.wav",
+                    "transcription": "10000",
+                    "spk_id": "spk_A",
+                    "gender": "male",
+                }
+            )
 
-        # Act
-        write_jsonl(records, out_path)
-        loaded = read_jsonl(out_path)
-
-        # Assert
-        assert len(loaded) == len(records)
-        for orig, restored in zip(records, loaded):
-            assert restored.audio_path == orig.audio_path
-            assert restored.transcription == orig.transcription
-            assert restored.spk_id == orig.spk_id
-            assert restored.gender == orig.gender
-            assert restored.ext == orig.ext
-            assert restored.samplerate == orig.samplerate
-
-    def test_write_produces_one_json_object_per_line(self, tmp_path: Path) -> None:
-        """Each line in the output file is a valid JSON object."""
-        # Arrange
-        records = [
-            ManifestRecord(
-                audio_path=tmp_path / "c.wav",
-                transcription="12000",
-                spk_id="spk_C",
-                gender="male",
-                ext="wav",
-                samplerate=16000,
-            ),
-        ]
-        out_path = tmp_path / "manifest.jsonl"
-
-        # Act
-        write_jsonl(records, out_path)
-
-        # Assert
-        lines = out_path.read_text().strip().splitlines()
-        assert len(lines) == 1
-        parsed = json.loads(lines[0])
-        assert isinstance(parsed, dict)
-
-    def test_read_restores_path_as_path_object(self, tmp_path: Path) -> None:
-        """read_jsonl returns ManifestRecord with audio_path as pathlib.Path."""
-        # Arrange
-        record = ManifestRecord(
-            audio_path=tmp_path / "d.wav",
-            transcription="10000",
-            spk_id="spk_D",
-            gender="male",
-            ext="wav",
-            samplerate=16000,
-        )
-        out_path = tmp_path / "manifest.jsonl"
-        write_jsonl([record], out_path)
-
-        # Act
-        loaded = read_jsonl(out_path)
-
-        # Assert
-        assert isinstance(loaded[0].audio_path, Path)
+        # Act / Assert
+        with pytest.raises(Exception):
+            records_from_csv(csv_path, audio_root)
 
 
 # ---------------------------------------------------------------------------

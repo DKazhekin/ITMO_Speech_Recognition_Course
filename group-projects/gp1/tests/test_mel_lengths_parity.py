@@ -139,7 +139,7 @@ def test_trainer_mel_lengths_with_audio_cfg():
             super().__init__()
             self.proj = nn.Linear(80, 35)
 
-        def forward(self, mel, mel_lengths):
+        def forward(self, mel, _mel_lengths):
             pooled = mel.mean(-1)
             lp = F.log_softmax(self.proj(pooled), -1).unsqueeze(1).expand(-1, 2, -1)
             return EncoderOutput(
@@ -166,9 +166,6 @@ def test_trainer_mel_lengths_with_audio_cfg():
         trainer = Trainer(
             model=_TinyEncoder(),
             ctc_loss=MagicMock(return_value=torch.tensor(0.5, requires_grad=True)),
-            inter_ctc=None,
-            cr_ctc=None,
-            word_aux=None,
             optimizer=torch.optim.SGD(_TinyEncoder().parameters(), lr=1e-3),
             scheduler=torch.optim.lr_scheduler.LambdaLR(
                 torch.optim.SGD(_TinyEncoder().parameters(), lr=1e-3),
