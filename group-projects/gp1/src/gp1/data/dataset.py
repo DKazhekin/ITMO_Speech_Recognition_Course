@@ -26,6 +26,43 @@ from gp1.text.normalize import digits_to_words
 from gp1.types import ManifestRecord
 
 
+def preload_audio_cache(
+    records: list[ManifestRecord], target_samplerate: int = 16000
+) -> dict[str, torch.Tensor]:
+    """Pre-load and resample all audio files into a RAM cache.
+
+    One-time cost (minutes); subsequent Dataset iterations skip disk I/O
+    and Resample entirely. Typical total size: ~4 bytes * 16000 * mean_duration
+    * len(records). For GP1 (~15k files x 2.3s avg x 16kHz): ~2 GB.
+    """
+    from tqdm import tqdm
+
+    cache: dict[str, torch.Tensor] = {}
+    resamplers: dict[int, torchaudio.transforms.Resample] = {}
+    for rec in tqdm(records, desc="preload audio"):
+        path_str = str(rec.audio_path)
+        if path_str in cache:
+            continue
+        data, sr = sf.read(path_str, dtype="float32", always_2d=False)
+        if data.ndim == 2:
+            data = data.mean(axis=1)
+        wav = torch.from_numpy(data.copy()).float()
+        if sr != target_samplerate:
+            if sr not in resamplers:
+                resamplers[sr] = torchaudio.transforms.Resample(
+                    orig_freq=sr, new_freq=target_samplerate
+                )
+            wav = resamplers[sr](wav.unsqueeze(0)).squeeze(0)
+        cache[path_str] = wav
+    total_bytes = sum(w.numel() * 4 for w in cache.values())
+    log.info(
+        "preload_audio_cache: %d tensors, %.2f GB RAM",
+        len(cache),
+        total_bytes / 1e9,
+    )
+    return cache
+
+
 @runtime_checkable
 class VocabProtocol(Protocol):
     """Structural interface required by SpokenNumbersDataset.
@@ -60,6 +97,8 @@ class SpokenNumbersDataset(torch.utils.data.Dataset):
         vocab: Any object satisfying ``VocabProtocol`` (e.g. ``CharVocab``, ``BPEVocab``).
         target_samplerate: All audio is resampled to this rate (Hz).
         augmenter: Optional AudioAugmenter applied in ``__getitem__``.
+        audio_cache: Optional {str(audio_path) -> Tensor} dict from
+            ``preload_audio_cache``. When provided, skips disk read and resample.
     """
 
     def __init__(
@@ -68,11 +107,13 @@ class SpokenNumbersDataset(torch.utils.data.Dataset):
         vocab: VocabProtocol,
         target_samplerate: int = 16000,
         augmenter: AudioAugmenter | None = None,
+        audio_cache: dict[str, torch.Tensor] | None = None,
     ) -> None:
         self._records = list(records)  # defensive copy — immutable inputs
         self._vocab = vocab
         self._target_sr = target_samplerate
         self._augmenter = augmenter
+        self._audio_cache = audio_cache
 
         # Pre-build resamplers keyed by native sample rate.
         # torchaudio.transforms.Resample is stateful but thread-safe for
@@ -98,7 +139,11 @@ class SpokenNumbersDataset(torch.utils.data.Dataset):
         """
         record = self._records[idx]
 
-        wav = self._resample(self._load_wav(str(record.audio_path)), record.samplerate)
+        path_str = str(record.audio_path)
+        if self._audio_cache is not None and path_str in self._audio_cache:
+            wav = self._audio_cache[path_str]
+        else:
+            wav = self._resample(self._load_wav(path_str), record.samplerate)
 
         # Augment.
         if self._augmenter is not None:
