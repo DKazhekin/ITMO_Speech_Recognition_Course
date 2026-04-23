@@ -1,5 +1,5 @@
 {
-  "extraPaths": ["group-projects/gp1/src"],
+  "extraPaths": ["group-projects/gp1/src", "group-projects/gp1/tests"],
   "venvPath": "group-projects/gp1",
   "venv": ".venv",
   "pythonVersion": "3.11",

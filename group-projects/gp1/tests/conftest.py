@@ -5,6 +5,7 @@ project's `src/` directory onto sys.path once per test session. This
 makes `from gp1.models.common import TCSConvBlock` etc. importable when
 pytest is launched from the gp1 project root.
 """
+
 from __future__ import annotations
 
 import sys
