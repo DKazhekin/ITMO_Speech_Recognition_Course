@@ -245,6 +245,7 @@ def _build_train_dataset(
     augmenter: AudioAugmenter | None,
     word_vocab: WordVocab | None,
     return_two_views: bool = False,
+    audio_cache_dir: Path | None = None,
 ) -> SpokenNumbersDataset:
     """Build the training dataset, enabling two-view audio when cr_ctc is active."""
     return SpokenNumbersDataset(
@@ -254,6 +255,7 @@ def _build_train_dataset(
         augmenter=augmenter,
         word_vocab=word_vocab,
         return_two_views=return_two_views,
+        audio_cache_dir=audio_cache_dir,
     )
 
 
@@ -279,7 +281,8 @@ def _build_dataloader(
             batch_sampler=sampler,
             collate_fn=collate_fn,
             num_workers=num_workers,
-            pin_memory=True,
+            pin_memory=False,
+            persistent_workers=num_workers > 0,
         )
     assert batch_size is not None, (
         "either max_tokens_per_batch or batch_size must be set"
@@ -290,7 +293,8 @@ def _build_dataloader(
         shuffle=shuffle,
         collate_fn=collate_fn,
         num_workers=num_workers,
-        pin_memory=True,
+        pin_memory=False,
+        persistent_workers=num_workers > 0,
     )
 
 
@@ -334,9 +338,19 @@ def main() -> int:
     parser.add_argument("--dev-csv", type=Path, default=None)
     parser.add_argument("--dev-root", type=Path, default=None)
     parser.add_argument("--output-dir", required=True, type=Path)
-    parser.add_argument("--num-workers", type=int, default=2)
+    parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--seed", type=int, default=1337)
+    parser.add_argument(
+        "--audio-cache-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Optional pre-resampled WAV cache directory produced by "
+            "scripts/precompute_audio.py. When set, dataset items are loaded "
+            "from cached 16-kHz PCM_16 WAVs instead of the original source files."
+        ),
+    )
     parser.add_argument(
         "--wandb-project",
         type=str,
@@ -390,6 +404,7 @@ def main() -> int:
         augmenter=augmenter,
         word_vocab=word_vocab,
         return_two_views=(cr_ctc_head is not None),
+        audio_cache_dir=args.audio_cache_dir,
     )
     dev_ds = SpokenNumbersDataset(
         dev_records,
@@ -397,6 +412,7 @@ def main() -> int:
         target_samplerate=target_sr,
         augmenter=None,
         word_vocab=word_vocab,
+        audio_cache_dir=args.audio_cache_dir,
     )
 
     data_cfg = cfg.get("data", {})

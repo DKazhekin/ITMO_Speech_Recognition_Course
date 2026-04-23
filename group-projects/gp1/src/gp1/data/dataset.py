@@ -6,6 +6,11 @@ torchaudio.transforms.Resample, applies optional AudioAugmenter, encodes the
 transcription (digit string -> Russian words -> CharVocab ids), and returns
 per-sample dicts.
 
+Optional audio cache (Phase B speed-up):
+  Pass ``audio_cache_dir`` to enable the pre-resampled WAV cache.  When a
+  cached file is found the raw soundfile decode + torchaudio resample are
+  skipped entirely — only one fast sf.read of a smaller int16 WAV is done.
+
 References:
   - soundfile.read: https://python-soundfile.readthedocs.io/
   - torchaudio.transforms.Resample:
@@ -16,6 +21,7 @@ References:
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import soundfile as sf
@@ -75,6 +81,11 @@ class SpokenNumbersDataset(torch.utils.data.Dataset):
         word_vocab: When provided, each item also exposes ``word_target``
             — a 1-D int64 tensor of word-level token ids — for the
             auxiliary word-level CTC head.
+        audio_cache_dir: Optional path to a pre-resampled 16-kHz PCM_16 WAV
+            cache produced by ``scripts/precompute_audio.py``.  When a cached
+            file for a record is found (matched by filename stem), the source
+            soundfile decode and torchaudio resample are skipped entirely.
+            Falls back to the uncached path on cache miss.
     """
 
     def __init__(
@@ -85,6 +96,7 @@ class SpokenNumbersDataset(torch.utils.data.Dataset):
         augmenter: AudioAugmenter | None = None,
         return_two_views: bool = False,
         word_vocab: WordVocab | None = None,
+        audio_cache_dir: Path | None = None,
     ) -> None:
         self._records = list(records)  # defensive copy — immutable inputs
         self._vocab = vocab
@@ -92,11 +104,31 @@ class SpokenNumbersDataset(torch.utils.data.Dataset):
         self._augmenter = augmenter
         self._return_two_views = return_two_views
         self._word_vocab = word_vocab
+        self._audio_cache_dir = (
+            Path(audio_cache_dir) if audio_cache_dir is not None else None
+        )
+        # Guards one-shot WARNING log if cache is set but misses keep happening.
+        self._cache_miss_warned: bool = False
 
         # Pre-build resamplers keyed by native sample rate.
         # torchaudio.transforms.Resample is stateful but thread-safe for
         # inference; we cache to avoid re-allocating the filter on every call.
         self._resamplers: dict[int, torchaudio.transforms.Resample] = {}
+
+        if self._audio_cache_dir is not None:
+            _cached_count = sum(
+                1
+                for r in self._records
+                if (
+                    self._audio_cache_dir / Path(r.audio_path.name).with_suffix(".wav")
+                ).exists()
+            )
+            log.info(
+                "SpokenNumbersDataset: audio_cache_dir=%s, %d/%d files cached",
+                self._audio_cache_dir,
+                _cached_count,
+                len(self._records),
+            )
 
     # ------------------------------------------------------------------
     # Dataset protocol
@@ -118,8 +150,7 @@ class SpokenNumbersDataset(torch.utils.data.Dataset):
         """
         record = self._records[idx]
 
-        wav = self._load_wav(str(record.audio_path))
-        wav = self._resample(wav, record.samplerate)
+        wav = self._load_audio_maybe_cached(record)
 
         # Augment — view 1.
         if self._augmenter is not None:
@@ -144,8 +175,7 @@ class SpokenNumbersDataset(torch.utils.data.Dataset):
         # Augment — view 2 (independent call; augmenter's internal RNG advances).
         if self._return_two_views:
             # Reload clean audio for view 2 so the augmenter sees the original.
-            wav2 = self._load_wav(str(record.audio_path))
-            wav2 = self._resample(wav2, record.samplerate)
+            wav2 = self._load_audio_maybe_cached(record)
             if self._augmenter is not None:
                 wav2 = self._augmenter(wav2, samplerate=self._target_sr)
             item["audio_view2"] = wav2
@@ -155,6 +185,40 @@ class SpokenNumbersDataset(torch.utils.data.Dataset):
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _load_audio_maybe_cached(self, record: ManifestRecord) -> torch.Tensor:
+        """Return waveform, reading from cache when available.
+
+        Cache hit path: one sf.read of a small PCM_16 WAV at target_samplerate
+        — no resample step needed.
+
+        Cache miss / no cache: fall through to ``_load_and_resample_from_source``.
+        """
+        if self._audio_cache_dir is not None:
+            cached = self._audio_cache_dir / Path(record.audio_path.name).with_suffix(
+                ".wav"
+            )
+            if cached.exists():
+                data, _ = sf.read(str(cached), dtype="float32", always_2d=False)
+                if data.ndim == 2:
+                    data = data.mean(axis=1)
+                return torch.from_numpy(data.copy()).float()
+            # Warn once on first cache miss so an incomplete or mismatched
+            # cache does not silently degrade training to the slow path.
+            if not self._cache_miss_warned:
+                log.warning(
+                    "audio_cache_dir set but cache miss for %s — falling back to "
+                    "source load+resample. Run scripts/precompute_audio.py to "
+                    "populate the cache, or unset --audio-cache-dir.",
+                    cached,
+                )
+                self._cache_miss_warned = True
+        return self._load_and_resample_from_source(record)
+
+    def _load_and_resample_from_source(self, record: ManifestRecord) -> torch.Tensor:
+        """Load from the original source file and resample to target_samplerate."""
+        wav = self._load_wav(str(record.audio_path))
+        return self._resample(wav, record.samplerate)
 
     @staticmethod
     def _load_wav(path: str) -> torch.Tensor:
