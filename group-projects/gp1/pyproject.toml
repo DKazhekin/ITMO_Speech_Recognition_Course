@@ -22,6 +22,7 @@ dependencies = [
 
 [project.optional-dependencies]
 bpe = ["sentencepiece>=0.2.0"]
+lm = ["kenlm>=0.2.0"]
 
 [dependency-groups]
 dev = [

@@ -162,3 +162,59 @@ def compute_per_speaker_cer(
         spk_hyps[spk].append(hyp)
 
     return {spk: compute_cer(spk_refs[spk], spk_hyps[spk]) for spk in spk_refs}
+
+
+def compute_digit_cer_in_out_harmonic(
+    refs_digits: list[str],
+    hyps_digits: list[str],
+    spk_ids: list[str],
+    in_domain_speakers: set[str],
+) -> tuple[float, float, float]:
+    """Split pairs by in/out-of-domain speaker and return (in_cer, out_cer, harmonic).
+
+    Edge cases:
+      * both subgroups empty -> (0.0, 0.0, 0.0)
+      * one subgroup empty   -> harmonic = max(in_cer, out_cer) + warning
+      * both CERs == 0       -> harmonic = 0.0 (avoids 0/0)
+
+    Raises:
+        ValueError: If input list lengths are not equal.
+    """
+    if not (len(refs_digits) == len(hyps_digits) == len(spk_ids)):
+        raise ValueError(
+            f"mismatched list lengths: refs_digits={len(refs_digits)}, "
+            f"hyps_digits={len(hyps_digits)}, spk_ids={len(spk_ids)}"
+        )
+
+    in_refs: list[str] = []
+    in_hyps: list[str] = []
+    out_refs: list[str] = []
+    out_hyps: list[str] = []
+
+    for ref, hyp, spk in zip(refs_digits, hyps_digits, spk_ids):
+        if spk in in_domain_speakers:
+            in_refs.append(ref)
+            in_hyps.append(hyp)
+        else:
+            out_refs.append(ref)
+            out_hyps.append(hyp)
+
+    if not in_refs and not out_refs:
+        return 0.0, 0.0, 0.0
+
+    in_cer = compute_cer(in_refs, in_hyps) if in_refs else 0.0
+    out_cer = compute_cer(out_refs, out_hyps) if out_refs else 0.0
+
+    if not in_refs or not out_refs:
+        missing = "in-domain" if not in_refs else "out-of-domain"
+        logger.warning(
+            "harmonic_in_out_digit_cer: %s subgroup empty; falling back to max(in, out)",
+            missing,
+        )
+        return in_cer, out_cer, max(in_cer, out_cer)
+
+    if in_cer == 0.0 and out_cer == 0.0:
+        return 0.0, 0.0, 0.0
+
+    harmonic = 2.0 * in_cer * out_cer / (in_cer + out_cer)
+    return in_cer, out_cer, harmonic

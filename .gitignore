@@ -77,7 +77,7 @@ htmlcov/
 
 # Data directories (raw audio, manifests, cache) — leading slash pins to repo
 # root; also cover per-project data dirs. Does NOT match src/gp1/data/ code.
-/data/
+data/
 group-projects/*/data/
 # models/
 # outputs/

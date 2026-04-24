@@ -8,11 +8,16 @@ CONTRACTS.md §8.
 
 from __future__ import annotations
 
+import logging
 import math
 
 import pytest
 
-from gp1.train.metrics import compute_cer, compute_per_speaker_cer
+from gp1.train.metrics import (
+    compute_cer,
+    compute_digit_cer_in_out_harmonic,
+    compute_per_speaker_cer,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -182,3 +187,155 @@ def test_per_speaker_cer_single_speaker_matches_compute_cer():
 
     # Assert: single speaker result == corpus result
     assert abs(per_spk["X"] - corpus) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# Harmonic in/out digit-CER
+# ---------------------------------------------------------------------------
+
+
+def test_harmonic_in_out_digit_cer_happy_path_non_empty_subgroups():
+    # Arrange: in-domain = {spk_A}, out = {spk_B}.
+    #   in:  ref="123" (3), hyp="124" -> 1 edit; in_cer = 1/3
+    #   out: ref="56"  (2), hyp="78"  -> 2 edits; out_cer = 2/2 = 1.0
+    refs = ["123", "56"]
+    hyps = ["124", "78"]
+    spk_ids = ["spk_A", "spk_B"]
+    in_domain = {"spk_A"}
+
+    # Act
+    in_cer, out_cer, hm = compute_digit_cer_in_out_harmonic(
+        refs, hyps, spk_ids, in_domain
+    )
+
+    # Assert
+    expected_in = 1.0 / 3.0
+    expected_out = 1.0
+    expected_hm = 2.0 * expected_in * expected_out / (expected_in + expected_out)
+    assert abs(in_cer - expected_in) < 1e-9
+    assert abs(out_cer - expected_out) < 1e-9
+    assert abs(hm - expected_hm) < 1e-9
+
+
+def test_harmonic_in_out_digit_cer_swapping_groups_yields_swapped_cer_and_same_harmonic():
+    # Arrange
+    refs = ["123", "56"]
+    hyps = ["124", "78"]
+    spk_ids = ["spk_A", "spk_B"]
+
+    # Act
+    in_a, out_a, hm_a = compute_digit_cer_in_out_harmonic(
+        refs, hyps, spk_ids, {"spk_A"}
+    )
+    in_b, out_b, hm_b = compute_digit_cer_in_out_harmonic(
+        refs, hyps, spk_ids, {"spk_B"}
+    )
+
+    # Assert: swap in/out, harmonic mean is symmetric.
+    assert abs(in_a - out_b) < 1e-9
+    assert abs(out_a - in_b) < 1e-9
+    assert abs(hm_a - hm_b) < 1e-9
+
+
+def test_harmonic_in_out_digit_cer_in_subgroup_empty_returns_out_cer_and_warns(caplog):
+    # Arrange: none of the speakers are in the in_domain set.
+    refs = ["123", "56"]
+    hyps = ["124", "78"]
+    spk_ids = ["spk_A", "spk_B"]
+    in_domain: set[str] = {"spk_UNKNOWN"}
+
+    # Act
+    with caplog.at_level(logging.WARNING, logger="gp1.train.metrics"):
+        in_cer, out_cer, hm = compute_digit_cer_in_out_harmonic(
+            refs, hyps, spk_ids, in_domain
+        )
+
+    # Assert: in is empty -> in_cer = 0.0 (compute_cer on [] returns 0.0),
+    # hm falls back to max(in_cer, out_cer) = out_cer.
+    expected_out = (1 + 2) / (3 + 2)
+    assert in_cer == 0.0
+    assert abs(out_cer - expected_out) < 1e-9
+    assert abs(hm - max(in_cer, out_cer)) < 1e-9
+    assert any("empty" in rec.message.lower() for rec in caplog.records)
+
+
+def test_harmonic_in_out_digit_cer_out_subgroup_empty_returns_in_cer_and_warns(caplog):
+    # Arrange: every speaker is in the in_domain set.
+    refs = ["123", "56"]
+    hyps = ["124", "78"]
+    spk_ids = ["spk_A", "spk_B"]
+    in_domain = {"spk_A", "spk_B"}
+
+    # Act
+    with caplog.at_level(logging.WARNING, logger="gp1.train.metrics"):
+        in_cer, out_cer, hm = compute_digit_cer_in_out_harmonic(
+            refs, hyps, spk_ids, in_domain
+        )
+
+    # Assert
+    expected_in = (1 + 2) / (3 + 2)
+    assert abs(in_cer - expected_in) < 1e-9
+    assert out_cer == 0.0
+    assert abs(hm - max(in_cer, out_cer)) < 1e-9
+    assert any("empty" in rec.message.lower() for rec in caplog.records)
+
+
+def test_harmonic_in_out_digit_cer_both_subgroups_empty_returns_zeros():
+    # Arrange
+    refs: list[str] = []
+    hyps: list[str] = []
+    spk_ids: list[str] = []
+    in_domain: set[str] = set()
+
+    # Act
+    in_cer, out_cer, hm = compute_digit_cer_in_out_harmonic(
+        refs, hyps, spk_ids, in_domain
+    )
+
+    # Assert
+    assert in_cer == 0.0
+    assert out_cer == 0.0
+    assert hm == 0.0
+
+
+def test_harmonic_in_out_digit_cer_both_zero_cer_returns_zero_not_nan():
+    # Arrange: both subgroups have identical refs/hyps -> 0 errors each.
+    refs = ["12", "34"]
+    hyps = ["12", "34"]
+    spk_ids = ["spk_A", "spk_B"]
+    in_domain = {"spk_A"}
+
+    # Act
+    in_cer, out_cer, hm = compute_digit_cer_in_out_harmonic(
+        refs, hyps, spk_ids, in_domain
+    )
+
+    # Assert
+    assert in_cer == 0.0
+    assert out_cer == 0.0
+    assert hm == 0.0
+    assert not math.isnan(hm)
+
+
+def test_harmonic_in_out_digit_cer_raises_on_length_mismatch():
+    # Arrange
+    refs = ["12", "34"]
+    hyps = ["12"]  # shorter
+    spk_ids = ["spk_A", "spk_B"]
+    in_domain: set[str] = {"spk_A"}
+
+    # Act / Assert
+    with pytest.raises(ValueError, match="mismatched"):
+        compute_digit_cer_in_out_harmonic(refs, hyps, spk_ids, in_domain)
+
+
+def test_harmonic_in_out_digit_cer_raises_on_spk_ids_length_mismatch():
+    # Arrange
+    refs = ["12", "34"]
+    hyps = ["12", "34"]
+    spk_ids = ["spk_A"]  # shorter
+    in_domain: set[str] = {"spk_A"}
+
+    # Act / Assert
+    with pytest.raises(ValueError, match="mismatched"):
+        compute_digit_cer_in_out_harmonic(refs, hyps, spk_ids, in_domain)

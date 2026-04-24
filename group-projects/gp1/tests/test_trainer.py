@@ -142,7 +142,7 @@ def test_trainer_config_has_correct_defaults():
     assert config.log_every_n_steps == 50
     assert config.val_every_n_epochs == 1
     assert config.early_stop_patience == 15
-    assert config.early_stop_metric == "max_speaker_cer"
+    assert config.early_stop_metric == "harmonic_in_out_digit_cer"
     assert config.ckpt_dir == Path("checkpoints")
 
 
@@ -154,10 +154,10 @@ def test_trainer_fit_returns_best_cer_and_ckpt_path(tmp_path):
     result = trainer.fit()
 
     # Assert
-    assert "best_val_cer" in result
+    assert "best_monitored" in result
     assert "best_ckpt_path" in result
     assert "history" in result
-    assert isinstance(result["best_val_cer"], float)
+    assert isinstance(result["best_monitored"], float)
     assert isinstance(result["best_ckpt_path"], Path)
     assert isinstance(result["history"], list)
     assert len(result["history"]) >= 1
@@ -231,7 +231,11 @@ def test_trainer_early_stops_after_patience_exceeded(tmp_path):
         tmp_path, max_epochs=max_epochs, early_stop_patience=patience
     )
 
-    with patch.object(trainer, "_run_validation", side_effect=lambda _epoch: (1.0, {})):
+    with patch.object(
+        trainer,
+        "_run_validation",
+        side_effect=lambda _epoch: (1.0, {}, 0.0, 0.0, 0.0, 0.5),
+    ):
         result = trainer.fit()
 
     # Assert: stopped before max_epochs; history has patience+1 entries at most
@@ -240,4 +244,4 @@ def test_trainer_early_stops_after_patience_exceeded(tmp_path):
     assert len(history) <= patience + 1, (
         f"Expected at most {patience + 1} val epochs, got {len(history)}"
     )
-    assert result["best_val_cer"] <= 1.0
+    assert result["best_monitored"] <= 1.0

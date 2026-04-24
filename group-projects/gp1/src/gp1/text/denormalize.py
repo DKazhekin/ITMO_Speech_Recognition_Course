@@ -190,3 +190,52 @@ def words_to_digits(text: str) -> str:
 
     total = thousands_part + units_value
     return str(total)
+
+
+# ---------------------------------------------------------------------------
+# Decoding-time helpers: safe wrapper + FSA-constrained beam selector
+# ---------------------------------------------------------------------------
+
+
+def safe_words_to_digits(text: str, fallback: str = "") -> str:
+    """Non-raising wrapper around ``words_to_digits``.
+
+    Catches ``ValueError`` only — ``KeyboardInterrupt`` and other
+    ``BaseException`` subclasses propagate. Returns ``fallback`` on parse failure.
+    """
+    try:
+        return words_to_digits(text)
+    except ValueError:
+        return fallback
+
+
+def fsa_constrained_best(
+    beams: list[tuple],
+    length_range: tuple[int, int] = (4, 6),
+) -> str:
+    """Pick the digit string of the beam with the highest acoustic score.
+
+    Consumes ``pyctcdecode.BeamSearchDecoderCTC.decode_beams`` output, using
+    index 0 (text) and index 3 (``logit_score``). A beam is kept when its
+    text parses via ``words_to_digits`` and the digit count falls in the
+    inclusive ``length_range``. On a logit-score tie the first occurrence
+    wins (``max`` is stable; pyctcdecode returns beams pre-sorted by score).
+    Returns "" when no beam qualifies or ``beams`` is empty.
+    """
+    min_len, max_len = length_range
+    candidates: list[tuple[str, float]] = []
+
+    for beam in beams:
+        text, logit_score = beam[0], beam[3]
+        try:
+            digits = words_to_digits(text)
+        except ValueError:
+            continue
+        if min_len <= len(digits) <= max_len:
+            candidates.append((digits, logit_score))
+
+    if not candidates:
+        return ""
+
+    best_digits, _ = max(candidates, key=lambda pair: pair[1])
+    return best_digits

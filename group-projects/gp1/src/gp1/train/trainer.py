@@ -15,9 +15,14 @@ from gp1.data.spec_aug import SpecAugmenter
 from gp1.decoding.greedy import greedy_decode
 from gp1.features.melbanks import LogMelFilterBanks
 from gp1.losses.ctc import CTCLoss
+from gp1.text.denormalize import safe_words_to_digits
 from gp1.text.normalize import digits_to_words
 from gp1.train.checkpoint import save_best
-from gp1.train.metrics import compute_cer, compute_per_speaker_cer
+from gp1.train.metrics import (
+    compute_cer,
+    compute_digit_cer_in_out_harmonic,
+    compute_per_speaker_cer,
+)
 from gp1.types import Batch
 
 logger = logging.getLogger(__name__)
@@ -34,10 +39,11 @@ class TrainerConfig:
     log_every_n_steps: int = 50
     val_every_n_epochs: int = 1
     early_stop_patience: int = 15
-    early_stop_metric: str = "max_speaker_cer"
+    early_stop_metric: str = "harmonic_in_out_digit_cer"
     ckpt_dir: Path = field(default_factory=lambda: Path("checkpoints"))
     grad_clip_norm: float | None = 1.0
     amp_dtype: torch.dtype = torch.bfloat16
+    in_domain_speakers: set[str] | None = None
 
 
 class Trainer:
@@ -58,6 +64,16 @@ class Trainer:
         spec_augmenter: SpecAugmenter | None = None,
         feature_extractor: LogMelFilterBanks | None = None,
     ) -> None:
+        if (
+            config.early_stop_metric == "harmonic_in_out_digit_cer"
+            and config.in_domain_speakers is None
+        ):
+            logger.warning(
+                "early_stop_metric='harmonic_in_out_digit_cer' requires "
+                "config.in_domain_speakers to be set; falling back to "
+                "'max_speaker_cer' for this Trainer instance."
+            )
+            config.early_stop_metric = "max_speaker_cer"
         self.model = model.to(device)
         self.ctc_loss = ctc_loss
         self.optimizer = optimizer
@@ -78,14 +94,14 @@ class Trainer:
         ):
             self._spec_augmenter = self._spec_augmenter.to(device)
         self._global_step: int = 0
-        self._best_val_cer: float = _INF_CER
+        self._best_monitored: float = _INF_CER
         self._best_ckpt_path: Path | None = None
         self._no_improve_epochs: int = 0
         config.ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     def fit(self) -> dict[str, Any]:
-        """Run training; return dict(best_val_cer, best_ckpt_path, history)."""
-        self._best_val_cer = _INF_CER
+        """Run training; return dict(best_monitored, best_ckpt_path, history)."""
+        self._best_monitored = _INF_CER
         self._best_ckpt_path = None
         self._no_improve_epochs = 0
         history: list[dict] = []
@@ -94,25 +110,37 @@ class Trainer:
             avg_loss = self._train_epoch(epoch)
 
             if epoch % self.config.val_every_n_epochs == 0:
-                val_cer, per_spk = self._run_validation(epoch)
+                (
+                    val_cer,
+                    per_spk,
+                    in_cer,
+                    out_cer,
+                    harmonic_cer,
+                    val_loss,
+                ) = self._run_validation(epoch)
                 max_spk_cer = max(per_spk.values()) if per_spk else val_cer
-                monitored = (
-                    max_spk_cer
-                    if self.config.early_stop_metric == "max_speaker_cer"
-                    else val_cer
-                )
+                if self.config.early_stop_metric == "harmonic_in_out_digit_cer":
+                    monitored = harmonic_cer
+                elif self.config.early_stop_metric == "max_speaker_cer":
+                    monitored = max_spk_cer
+                else:
+                    monitored = val_cer
                 history.append(
                     {
                         "epoch": epoch,
                         "train_loss_avg": avg_loss,
+                        "val_loss": val_loss,
                         "val_cer": val_cer,
                         "per_speaker_cer": per_spk,
                         "max_speaker_cer": max_spk_cer,
+                        "in_cer": in_cer,
+                        "out_cer": out_cer,
+                        "harmonic_cer": harmonic_cer,
                     }
                 )
 
-                if monitored < self._best_val_cer:
-                    self._best_val_cer = monitored
+                if monitored < self._best_monitored:
+                    self._best_monitored = monitored
                     self._no_improve_epochs = 0
                     self._best_ckpt_path = save_best(
                         self.model,
@@ -120,21 +148,35 @@ class Trainer:
                             "epoch": epoch,
                             "val_cer": val_cer,
                             "max_speaker_cer": max_spk_cer,
+                            "best_monitored": self._best_monitored,
                         },
                         self.config.ckpt_dir,
                     )
                 else:
                     self._no_improve_epochs += 1
 
-                logger.info(
-                    "epoch %d val_cer=%.4f max_spk=%.4f best=%.4f no_improve=%d/%d",
-                    epoch,
-                    val_cer,
-                    max_spk_cer,
-                    self._best_val_cer,
-                    self._no_improve_epochs,
-                    self.config.early_stop_patience,
+                tqdm.write(
+                    f"[Epoch {epoch}/{self.config.max_epochs}] train  | "
+                    f"loss={avg_loss:.4f}"
                 )
+                if self.config.in_domain_speakers is None:
+                    tqdm.write(
+                        f"[Epoch {epoch}/{self.config.max_epochs}] val    | "
+                        f"loss={val_loss:.4f}  cer={val_cer:.4f}  "
+                        f"max_spk={max_spk_cer:.4f}  "
+                        f"best={self._best_monitored:.4f}  "
+                        f"no_improve={self._no_improve_epochs}/"
+                        f"{self.config.early_stop_patience}"
+                    )
+                else:
+                    tqdm.write(
+                        f"[Epoch {epoch}/{self.config.max_epochs}] val    | "
+                        f"loss={val_loss:.4f}  hm_cer={harmonic_cer:.4f}  "
+                        f"(in={in_cer:.4f}  out={out_cer:.4f})  "
+                        f"best={self._best_monitored:.4f}  "
+                        f"no_improve={self._no_improve_epochs}/"
+                        f"{self.config.early_stop_patience}"
+                    )
 
                 if self._no_improve_epochs >= self.config.early_stop_patience:
                     logger.info(
@@ -148,14 +190,15 @@ class Trainer:
                 self.model,
                 {
                     "epoch": 0,
-                    "val_cer": self._best_val_cer,
-                    "max_speaker_cer": self._best_val_cer,
+                    "val_cer": self._best_monitored,
+                    "max_speaker_cer": self._best_monitored,
+                    "best_monitored": self._best_monitored,
                 },
                 self.config.ckpt_dir,
             )
 
         return {
-            "best_val_cer": self._best_val_cer,
+            "best_monitored": self._best_monitored,
             "best_ckpt_path": self._best_ckpt_path,
             "history": history,
         }
@@ -184,13 +227,6 @@ class Trainer:
                 self.scheduler.step()
                 self.optimizer.zero_grad()
                 self._global_step += 1
-                if self._global_step % self.config.log_every_n_steps == 0:
-                    logger.info(
-                        "epoch %d step %d loss=%.4f",
-                        epoch,
-                        self._global_step,
-                        loss.item(),
-                    )
 
         if len(self.train_loader) % self.config.grad_accum != 0:
             if self.config.grad_clip_norm is not None:
@@ -243,12 +279,22 @@ class Trainer:
             )
         return loss
 
-    def _run_validation(self, epoch: int) -> tuple[float, dict[str, float]]:
-        """Run greedy-decode validation; return (corpus_cer, per_speaker_cer)."""
+    def _run_validation(
+        self, epoch: int
+    ) -> tuple[float, dict[str, float], float, float, float, float]:
+        """Run greedy-decode validation.
+
+        Returns:
+            (corpus_cer, per_speaker_cer, in_cer, out_cer, harmonic_cer, val_loss).
+            in_cer/out_cer/harmonic_cer are zeros when config.in_domain_speakers is None.
+        """
         self.model.eval()
         all_refs: list[str] = []
         all_hyps: list[str] = []
         all_spks: list[str] = []
+        all_refs_digits: list[str] = []
+        val_loss_sum = 0.0
+        val_loss_count = 0
 
         with (
             torch.no_grad(),
@@ -259,18 +305,45 @@ class Trainer:
             ),
         ):
             for batch in self.val_loader:
-                mel, mel_lengths = self._mel_features(
-                    batch.audio.to(self.device), batch.audio_lengths.to(self.device)
-                )
+                audio = batch.audio.to(self.device)
+                audio_lengths = batch.audio_lengths.to(self.device)
+                targets = batch.targets.to(self.device)
+                target_lengths = batch.target_lengths.to(self.device)
+
+                mel, mel_lengths = self._mel_features(audio, audio_lengths)
                 encoder_out = self.model(mel, mel_lengths)
+
+                log_probs_fp32 = encoder_out.log_probs.float()
+                with torch.autocast(device_type=self.device.type, enabled=False):
+                    loss = self.ctc_loss(
+                        log_probs_fp32,
+                        targets,
+                        encoder_out.output_lengths,
+                        target_lengths,
+                    )
+                val_loss_sum += loss.item()
+                val_loss_count += 1
+
                 decoded = greedy_decode(
                     encoder_out.log_probs, encoder_out.output_lengths, self.vocab
                 )
                 all_refs.extend(digits_to_words(t) for t in batch.transcriptions)
                 all_hyps.extend(decoded)
                 all_spks.extend(batch.spk_ids)
+                all_refs_digits.extend(batch.transcriptions)
 
         corpus_cer = compute_cer(all_refs, all_hyps)
         per_spk = compute_per_speaker_cer(all_refs, all_hyps, all_spks)
-        logger.info("validation epoch %d corpus_cer=%.4f", epoch, corpus_cer)
-        return corpus_cer, per_spk
+        val_loss = val_loss_sum / max(val_loss_count, 1)
+
+        if self.config.in_domain_speakers is None:
+            return corpus_cer, per_spk, 0.0, 0.0, 0.0, val_loss
+
+        all_hyps_digits = [safe_words_to_digits(h, fallback="") for h in all_hyps]
+        in_cer, out_cer, harmonic_cer = compute_digit_cer_in_out_harmonic(
+            all_refs_digits,
+            all_hyps_digits,
+            all_spks,
+            self.config.in_domain_speakers,
+        )
+        return corpus_cer, per_spk, in_cer, out_cer, harmonic_cer, val_loss

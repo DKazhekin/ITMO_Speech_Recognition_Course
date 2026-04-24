@@ -351,6 +351,9 @@ dependencies = [
 bpe = [
     { name = "sentencepiece" },
 ]
+lm = [
+    { name = "kenlm" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -363,6 +366,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "jiwer", specifier = ">=3.0.4" },
+    { name = "kenlm", marker = "extra == 'lm'", specifier = ">=0.2.0" },
     { name = "num2words", specifier = ">=0.5.13" },
     { name = "pyctcdecode", specifier = ">=0.5.0" },
     { name = "pyyaml", specifier = ">=6.0.2" },
@@ -373,7 +377,7 @@ requires-dist = [
     { name = "tqdm", specifier = ">=4.66.0" },
     { name = "wandb", specifier = ">=0.18.0" },
 ]
-provides-extras = ["bpe"]
+provides-extras = ["bpe", "lm"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -475,6 +479,12 @@ sdist = { url = "https://files.pythonhosted.org/packages/02/49/9d1284d0dc65e2c75
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e7/e7/80988e32bf6f73919a113473a604f5a8f09094de312b9d52b79c2df7612b/jupyter_core-5.9.1-py3-none-any.whl", hash = "sha256:ebf87fdc6073d142e114c72c9e29a9d7ca03fad818c5d300ce2adc1fb0743407", size = 29032, upload-time = "2025-10-16T19:19:16.783Z" },
 ]
+
+[[package]]
+name = "kenlm"
+version = "0.3.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/02/6e/f4e159cef39ea4ef2244b4aa32857d447d60a5d0ee269e1b1f8d3723c03e/kenlm-0.3.0.tar.gz", hash = "sha256:c4628bb9fb63c8a6f9240035b8b037385cfc404cb72e933cf48878291edac1e8", size = 427500, upload-time = "2025-04-07T13:26:38.795Z" }
 
 [[package]]
 name = "markupsafe"
