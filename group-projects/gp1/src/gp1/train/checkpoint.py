@@ -10,10 +10,15 @@ import torch.nn as nn
 
 
 def save_best(model: nn.Module, meta: dict, ckpt_dir: Path) -> Path:
-    """Save model state_dict to ckpt_dir/best.pt and meta to ckpt_dir/meta.json."""
+    """Save model state_dict to ckpt_dir/best.pt and meta to ckpt_dir/meta.json.
+
+    Unwraps ``torch.compile``'s OptimizedModule via ``_orig_mod`` so the saved
+    keys match a non-compiled instance of the same architecture at load time.
+    """
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     pt_path = ckpt_dir / "best.pt"
-    torch.save(model.state_dict(), pt_path)
+    inner = getattr(model, "_orig_mod", model)
+    torch.save(inner.state_dict(), pt_path)
     (ckpt_dir / "meta.json").write_text(json.dumps(meta, indent=2, default=str))
     return pt_path
 

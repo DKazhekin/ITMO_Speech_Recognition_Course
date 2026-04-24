@@ -15,6 +15,7 @@ from gp1.data.spec_aug import SpecAugmenter
 from gp1.decoding.greedy import greedy_decode
 from gp1.features.melbanks import LogMelFilterBanks
 from gp1.losses.ctc import CTCLoss
+from gp1.text.normalize import digits_to_words
 from gp1.train.checkpoint import save_best
 from gp1.train.metrics import compute_cer, compute_per_speaker_cer
 from gp1.types import Batch
@@ -35,6 +36,8 @@ class TrainerConfig:
     early_stop_patience: int = 15
     early_stop_metric: str = "max_speaker_cer"
     ckpt_dir: Path = field(default_factory=lambda: Path("checkpoints"))
+    grad_clip_norm: float | None = 1.0
+    amp_dtype: torch.dtype = torch.bfloat16
 
 
 class Trainer:
@@ -173,6 +176,10 @@ class Trainer:
             count += 1
 
             if (micro_idx + 1) % self.config.grad_accum == 0:
+                if self.config.grad_clip_norm is not None:
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(), self.config.grad_clip_norm
+                    )
                 self.optimizer.step()
                 self.scheduler.step()
                 self.optimizer.zero_grad()
@@ -186,6 +193,10 @@ class Trainer:
                     )
 
         if len(self.train_loader) % self.config.grad_accum != 0:
+            if self.config.grad_clip_norm is not None:
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(), self.config.grad_clip_norm
+                )
             self.optimizer.step()
             self.scheduler.step()
             self.optimizer.zero_grad()
@@ -219,7 +230,9 @@ class Trainer:
             mel = self._spec_augmenter(mel, mel_lengths)
 
         with torch.autocast(
-            device_type=self.device.type, enabled=self.config.fp16_autocast
+            device_type=self.device.type,
+            enabled=self.config.fp16_autocast,
+            dtype=self.config.amp_dtype,
         ):
             encoder_out = self.model(mel, mel_lengths)
 
@@ -237,7 +250,14 @@ class Trainer:
         all_hyps: list[str] = []
         all_spks: list[str] = []
 
-        with torch.no_grad():
+        with (
+            torch.no_grad(),
+            torch.autocast(
+                device_type=self.device.type,
+                enabled=self.config.fp16_autocast,
+                dtype=self.config.amp_dtype,
+            ),
+        ):
             for batch in self.val_loader:
                 mel, mel_lengths = self._mel_features(
                     batch.audio.to(self.device), batch.audio_lengths.to(self.device)
@@ -246,7 +266,7 @@ class Trainer:
                 decoded = greedy_decode(
                     encoder_out.log_probs, encoder_out.output_lengths, self.vocab
                 )
-                all_refs.extend(batch.transcriptions)
+                all_refs.extend(digits_to_words(t) for t in batch.transcriptions)
                 all_hyps.extend(decoded)
                 all_spks.extend(batch.spk_ids)
 
