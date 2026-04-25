@@ -84,6 +84,8 @@ class Trainer:
         self.vocab = vocab
         self.config = config
         self.device = device
+        if torch.cuda.is_available():
+            torch.backends.cuda.cufft_plan_cache.max_size = 8
         self._mel = (
             feature_extractor
             if feature_extractor is not None
@@ -117,6 +119,7 @@ class Trainer:
             # so a long-T val batch does not OOM on top of training peak.
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+                torch.backends.cuda.cufft_plan_cache.clear()
 
             if epoch % self.config.val_every_n_epochs == 0:
                 (

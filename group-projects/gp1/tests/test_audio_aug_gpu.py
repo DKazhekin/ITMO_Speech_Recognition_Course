@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import numpy as np
 import pytest
+import soundfile as sf
 import torch
 
 from gp1.data.audio_aug_gpu import GPUAudioAugmenter
@@ -80,10 +84,90 @@ def test_apply_rir_batched_preserves_length(
     """_apply_rir_batched returns tensor of same shape [B, T]."""
     audio, _ = batch
     aug = GPUAudioAugmenter(vtlp_prob=0.0, noise_prob=0.0, rir_prob=1.0)
-    aug._rir_pool = [torch.randn(4096)]  # synthetic IR
+    ir = torch.randn(4096)
+    aug._rir_pool = [ir / (ir.norm() + 1e-9)]
 
     out = aug._apply_rir_batched(audio.clone())
 
+    assert out.shape == audio.shape
+
+
+def test_load_pool_truncates_long_irs_to_half_second(tmp_path: Path) -> None:
+    """_load_pool truncates IRs to <=0.5s at samplerate."""
+    samplerate = 16000
+    rng = np.random.default_rng(0)
+    arr = rng.standard_normal(32000).astype(np.float32)
+    sf.write(tmp_path / "long_ir.wav", arr, samplerate)
+
+    aug = GPUAudioAugmenter(
+        samplerate=samplerate,
+        vtlp_prob=0.0,
+        noise_prob=0.0,
+        rir_prob=0.0,
+        rir_root=tmp_path,
+    )
+
+    max_samples = int(0.5 * samplerate)
+    assert len(aug._rir_pool) == 1
+    for ir in aug._rir_pool:
+        assert ir.numel() <= max_samples
+
+
+def test_load_pool_normalizes_irs_at_load_time(tmp_path: Path) -> None:
+    """_load_pool returns unit-norm IRs."""
+    samplerate = 16000
+    rng = np.random.default_rng(1)
+    for i, n in enumerate((4000, 6000, 8000)):
+        arr = rng.standard_normal(n).astype(np.float32) * (i + 1)
+        sf.write(tmp_path / f"ir_{i}.wav", arr, samplerate)
+
+    aug = GPUAudioAugmenter(
+        samplerate=samplerate,
+        vtlp_prob=0.0,
+        noise_prob=0.0,
+        rir_prob=0.0,
+        rir_root=tmp_path,
+    )
+
+    assert len(aug._rir_pool) == 3
+    for ir in aug._rir_pool:
+        assert torch.allclose(ir.norm(), torch.tensor(1.0), atol=1e-3)
+
+
+def test_apply_rir_batched_uses_conv1d_no_fft(
+    monkeypatch: pytest.MonkeyPatch,
+    batch: tuple[torch.Tensor, torch.Tensor],
+) -> None:
+    """RIR path must NOT call torchaudio.functional.fftconvolve."""
+    import torchaudio.functional as taF
+
+    def _fail(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        raise AssertionError("fftconvolve called")
+
+    monkeypatch.setattr(taF, "fftconvolve", _fail)
+
+    audio, lengths = batch
+    aug = GPUAudioAugmenter(vtlp_prob=0.0, noise_prob=0.0, rir_prob=1.0)
+    ir = torch.randn(2048)
+    aug._rir_pool = [ir / (ir.norm() + 1e-9)]
+
+    out = aug(audio, lengths)
+    assert out.shape == audio.shape
+
+
+def test_apply_rir_batched_preserves_dtype(
+    batch: tuple[torch.Tensor, torch.Tensor],
+) -> None:
+    """forward with RIR enabled keeps fp32 dtype and shape."""
+    audio, lengths = batch
+    assert audio.dtype == torch.float32
+    aug = GPUAudioAugmenter(vtlp_prob=0.0, noise_prob=0.0, rir_prob=1.0)
+    ir = torch.randn(2048)
+    aug._rir_pool = [ir / (ir.norm() + 1e-9)]
+
+    out = aug(audio, lengths)
+
+    assert out.dtype == torch.float32
     assert out.shape == audio.shape
 
 
