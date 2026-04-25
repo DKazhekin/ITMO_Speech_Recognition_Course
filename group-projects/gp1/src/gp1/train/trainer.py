@@ -11,16 +11,16 @@ import torch
 import torch.nn as nn
 from tqdm.auto import tqdm
 
+from gp1.data.audio_aug_gpu import GPUAudioAugmenter
 from gp1.data.spec_aug import SpecAugmenter
 from gp1.decoding.greedy import greedy_decode
 from gp1.features.melbanks import LogMelFilterBanks
 from gp1.losses.ctc import CTCLoss
-from gp1.text.denormalize import safe_words_to_digits
 from gp1.text.normalize import digits_to_words
 from gp1.train.checkpoint import save_best
 from gp1.train.metrics import (
     compute_cer,
-    compute_digit_cer_in_out_harmonic,
+    compute_cer_in_out_harmonic,
     compute_per_speaker_cer,
 )
 from gp1.types import Batch
@@ -39,7 +39,7 @@ class TrainerConfig:
     log_every_n_steps: int = 50
     val_every_n_epochs: int = 1
     early_stop_patience: int = 15
-    early_stop_metric: str = "harmonic_in_out_digit_cer"
+    early_stop_metric: str = "harmonic_in_out_cer"
     ckpt_dir: Path = field(default_factory=lambda: Path("checkpoints"))
     grad_clip_norm: float | None = 1.0
     amp_dtype: torch.dtype = torch.bfloat16
@@ -62,14 +62,15 @@ class Trainer:
         device: torch.device,
         audio_cfg: dict,
         spec_augmenter: SpecAugmenter | None = None,
+        gpu_augmenter: GPUAudioAugmenter | None = None,
         feature_extractor: LogMelFilterBanks | None = None,
     ) -> None:
         if (
-            config.early_stop_metric == "harmonic_in_out_digit_cer"
+            config.early_stop_metric == "harmonic_in_out_cer"
             and config.in_domain_speakers is None
         ):
             logger.warning(
-                "early_stop_metric='harmonic_in_out_digit_cer' requires "
+                "early_stop_metric='harmonic_in_out_cer' requires "
                 "config.in_domain_speakers to be set; falling back to "
                 "'max_speaker_cer' for this Trainer instance."
             )
@@ -93,6 +94,9 @@ class Trainer:
             self._spec_augmenter, nn.Module
         ):
             self._spec_augmenter = self._spec_augmenter.to(device)
+        self._gpu_augmenter: GPUAudioAugmenter | None = (
+            gpu_augmenter.to(device) if gpu_augmenter is not None else None
+        )
         self._global_step: int = 0
         self._best_monitored: float = _INF_CER
         self._best_ckpt_path: Path | None = None
@@ -109,6 +113,11 @@ class Trainer:
         for epoch in tqdm(range(1, self.config.max_epochs + 1), desc="epochs"):
             avg_loss = self._train_epoch(epoch)
 
+            # Reclaim fragmented activations / cached graphs before validation,
+            # so a long-T val batch does not OOM on top of training peak.
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
             if epoch % self.config.val_every_n_epochs == 0:
                 (
                     val_cer,
@@ -119,7 +128,7 @@ class Trainer:
                     val_loss,
                 ) = self._run_validation(epoch)
                 max_spk_cer = max(per_spk.values()) if per_spk else val_cer
-                if self.config.early_stop_metric == "harmonic_in_out_digit_cer":
+                if self.config.early_stop_metric == "harmonic_in_out_cer":
                     monitored = harmonic_cer
                 elif self.config.early_stop_metric == "max_speaker_cer":
                     monitored = max_spk_cer
@@ -255,11 +264,12 @@ class Trainer:
         audio = batch.audio.to(self.device)
         targets = batch.targets.to(self.device)
         target_lengths = batch.target_lengths.to(self.device)
+        audio_lengths = batch.audio_lengths.to(self.device)
 
         with torch.no_grad():
-            mel, mel_lengths = self._mel_features(
-                audio, batch.audio_lengths.to(self.device)
-            )
+            if self._gpu_augmenter is not None and self.model.training:
+                audio = self._gpu_augmenter(audio, audio_lengths)
+            mel, mel_lengths = self._mel_features(audio, audio_lengths)
 
         if self._spec_augmenter is not None and self.model.training:
             self._spec_augmenter.train()
@@ -292,7 +302,6 @@ class Trainer:
         all_refs: list[str] = []
         all_hyps: list[str] = []
         all_spks: list[str] = []
-        all_refs_digits: list[str] = []
         val_loss_sum = 0.0
         val_loss_count = 0
 
@@ -330,7 +339,6 @@ class Trainer:
                 all_refs.extend(digits_to_words(t) for t in batch.transcriptions)
                 all_hyps.extend(decoded)
                 all_spks.extend(batch.spk_ids)
-                all_refs_digits.extend(batch.transcriptions)
 
         corpus_cer = compute_cer(all_refs, all_hyps)
         per_spk = compute_per_speaker_cer(all_refs, all_hyps, all_spks)
@@ -339,10 +347,9 @@ class Trainer:
         if self.config.in_domain_speakers is None:
             return corpus_cer, per_spk, 0.0, 0.0, 0.0, val_loss
 
-        all_hyps_digits = [safe_words_to_digits(h, fallback="") for h in all_hyps]
-        in_cer, out_cer, harmonic_cer = compute_digit_cer_in_out_harmonic(
-            all_refs_digits,
-            all_hyps_digits,
+        in_cer, out_cer, harmonic_cer = compute_cer_in_out_harmonic(
+            all_refs,
+            all_hyps,
             all_spks,
             self.config.in_domain_speakers,
         )

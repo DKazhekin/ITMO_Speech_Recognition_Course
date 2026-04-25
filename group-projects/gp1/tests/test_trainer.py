@@ -142,7 +142,7 @@ def test_trainer_config_has_correct_defaults():
     assert config.log_every_n_steps == 50
     assert config.val_every_n_epochs == 1
     assert config.early_stop_patience == 15
-    assert config.early_stop_metric == "harmonic_in_out_digit_cer"
+    assert config.early_stop_metric == "harmonic_in_out_cer"
     assert config.ckpt_dir == Path("checkpoints")
 
 

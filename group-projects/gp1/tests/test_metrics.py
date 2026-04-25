@@ -15,7 +15,7 @@ import pytest
 
 from gp1.train.metrics import (
     compute_cer,
-    compute_digit_cer_in_out_harmonic,
+    compute_cer_in_out_harmonic,
     compute_per_speaker_cer,
 )
 
@@ -204,7 +204,7 @@ def test_harmonic_in_out_digit_cer_happy_path_non_empty_subgroups():
     in_domain = {"spk_A"}
 
     # Act
-    in_cer, out_cer, hm = compute_digit_cer_in_out_harmonic(
+    in_cer, out_cer, hm = compute_cer_in_out_harmonic(
         refs, hyps, spk_ids, in_domain
     )
 
@@ -224,10 +224,10 @@ def test_harmonic_in_out_digit_cer_swapping_groups_yields_swapped_cer_and_same_h
     spk_ids = ["spk_A", "spk_B"]
 
     # Act
-    in_a, out_a, hm_a = compute_digit_cer_in_out_harmonic(
+    in_a, out_a, hm_a = compute_cer_in_out_harmonic(
         refs, hyps, spk_ids, {"spk_A"}
     )
-    in_b, out_b, hm_b = compute_digit_cer_in_out_harmonic(
+    in_b, out_b, hm_b = compute_cer_in_out_harmonic(
         refs, hyps, spk_ids, {"spk_B"}
     )
 
@@ -246,7 +246,7 @@ def test_harmonic_in_out_digit_cer_in_subgroup_empty_returns_out_cer_and_warns(c
 
     # Act
     with caplog.at_level(logging.WARNING, logger="gp1.train.metrics"):
-        in_cer, out_cer, hm = compute_digit_cer_in_out_harmonic(
+        in_cer, out_cer, hm = compute_cer_in_out_harmonic(
             refs, hyps, spk_ids, in_domain
         )
 
@@ -268,7 +268,7 @@ def test_harmonic_in_out_digit_cer_out_subgroup_empty_returns_in_cer_and_warns(c
 
     # Act
     with caplog.at_level(logging.WARNING, logger="gp1.train.metrics"):
-        in_cer, out_cer, hm = compute_digit_cer_in_out_harmonic(
+        in_cer, out_cer, hm = compute_cer_in_out_harmonic(
             refs, hyps, spk_ids, in_domain
         )
 
@@ -288,7 +288,7 @@ def test_harmonic_in_out_digit_cer_both_subgroups_empty_returns_zeros():
     in_domain: set[str] = set()
 
     # Act
-    in_cer, out_cer, hm = compute_digit_cer_in_out_harmonic(
+    in_cer, out_cer, hm = compute_cer_in_out_harmonic(
         refs, hyps, spk_ids, in_domain
     )
 
@@ -306,7 +306,7 @@ def test_harmonic_in_out_digit_cer_both_zero_cer_returns_zero_not_nan():
     in_domain = {"spk_A"}
 
     # Act
-    in_cer, out_cer, hm = compute_digit_cer_in_out_harmonic(
+    in_cer, out_cer, hm = compute_cer_in_out_harmonic(
         refs, hyps, spk_ids, in_domain
     )
 
@@ -326,7 +326,7 @@ def test_harmonic_in_out_digit_cer_raises_on_length_mismatch():
 
     # Act / Assert
     with pytest.raises(ValueError, match="mismatched"):
-        compute_digit_cer_in_out_harmonic(refs, hyps, spk_ids, in_domain)
+        compute_cer_in_out_harmonic(refs, hyps, spk_ids, in_domain)
 
 
 def test_harmonic_in_out_digit_cer_raises_on_spk_ids_length_mismatch():
@@ -338,4 +338,4 @@ def test_harmonic_in_out_digit_cer_raises_on_spk_ids_length_mismatch():
 
     # Act / Assert
     with pytest.raises(ValueError, match="mismatched"):
-        compute_digit_cer_in_out_harmonic(refs, hyps, spk_ids, in_domain)
+        compute_cer_in_out_harmonic(refs, hyps, spk_ids, in_domain)

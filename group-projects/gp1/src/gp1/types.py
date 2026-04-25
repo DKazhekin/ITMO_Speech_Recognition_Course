@@ -33,20 +33,8 @@ class Batch:
 class AugConfig:
     speed_factors: tuple[float, ...] = (0.9, 1.0, 1.1)
     speed_prob: float = 1.0
-    vtlp_prob: float = 0.5
-    vtlp_alpha_range: tuple[float, float] = (0.9, 1.1)
     pitch_prob: float = 0.3
     pitch_range_semitones: tuple[float, float] = (-3.0, 3.0)
     gain_prob: float = 0.7
     gain_db_range: tuple[float, float] = (-8.0, 8.0)
-    noise_prob: float = 0.3
-    noise_snr_db_range: tuple[float, float] = (5.0, 20.0)
-    musan_root: Path | None = None
-    rir_prob: float = 0.1
-    rir_root: Path | None = None
-    specaug_freq_mask_param: int = 15
-    specaug_num_freq_masks: int = 2
-    specaug_time_mask_param: int = 25
-    specaug_num_time_masks: int = 5
-    specaug_time_mask_max_ratio: float = 0.05
     seed: int | None = None

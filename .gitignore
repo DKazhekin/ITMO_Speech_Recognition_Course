@@ -55,6 +55,10 @@ Thumbs.db
 # *.flac
 # *.ogg
 # *.aac
+*.zip
+*.txt
+*.bin
+*.gz
 
 # Large model files
 *.pt
@@ -79,5 +83,6 @@ htmlcov/
 # root; also cover per-project data dirs. Does NOT match src/gp1/data/ code.
 data/
 group-projects/*/data/
+checkpoints/
 # models/
 # outputs/

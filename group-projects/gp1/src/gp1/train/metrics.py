@@ -164,13 +164,16 @@ def compute_per_speaker_cer(
     return {spk: compute_cer(spk_refs[spk], spk_hyps[spk]) for spk in spk_refs}
 
 
-def compute_digit_cer_in_out_harmonic(
-    refs_digits: list[str],
-    hyps_digits: list[str],
+def compute_cer_in_out_harmonic(
+    refs: list[str],
+    hyps: list[str],
     spk_ids: list[str],
     in_domain_speakers: set[str],
 ) -> tuple[float, float, float]:
     """Split pairs by in/out-of-domain speaker and return (in_cer, out_cer, harmonic).
+
+    CER is computed on whatever string representation the caller passes
+    (typically the word-level transcription used by ``compute_cer``).
 
     Edge cases:
       * both subgroups empty -> (0.0, 0.0, 0.0)
@@ -180,10 +183,10 @@ def compute_digit_cer_in_out_harmonic(
     Raises:
         ValueError: If input list lengths are not equal.
     """
-    if not (len(refs_digits) == len(hyps_digits) == len(spk_ids)):
+    if not (len(refs) == len(hyps) == len(spk_ids)):
         raise ValueError(
-            f"mismatched list lengths: refs_digits={len(refs_digits)}, "
-            f"hyps_digits={len(hyps_digits)}, spk_ids={len(spk_ids)}"
+            f"mismatched list lengths: refs={len(refs)}, "
+            f"hyps={len(hyps)}, spk_ids={len(spk_ids)}"
         )
 
     in_refs: list[str] = []
@@ -191,7 +194,7 @@ def compute_digit_cer_in_out_harmonic(
     out_refs: list[str] = []
     out_hyps: list[str] = []
 
-    for ref, hyp, spk in zip(refs_digits, hyps_digits, spk_ids):
+    for ref, hyp, spk in zip(refs, hyps, spk_ids):
         if spk in in_domain_speakers:
             in_refs.append(ref)
             in_hyps.append(hyp)
@@ -208,7 +211,7 @@ def compute_digit_cer_in_out_harmonic(
     if not in_refs or not out_refs:
         missing = "in-domain" if not in_refs else "out-of-domain"
         logger.warning(
-            "harmonic_in_out_digit_cer: %s subgroup empty; falling back to max(in, out)",
+            "harmonic_in_out_cer: %s subgroup empty; falling back to max(in, out)",
             missing,
         )
         return in_cer, out_cer, max(in_cer, out_cer)

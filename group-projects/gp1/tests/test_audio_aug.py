@@ -25,7 +25,7 @@ def test_augmenter_is_deterministic_under_fixed_seed(wav_1s: torch.Tensor) -> No
     from gp1.data.audio_aug import AudioAugmenter
     from gp1.types import AugConfig
 
-    cfg = AugConfig(seed=42, musan_root=None, rir_root=None)
+    cfg = AugConfig(seed=42)
 
     # Act
     out_a = AudioAugmenter(cfg)(wav_1s.clone())
@@ -67,12 +67,7 @@ def test_speed_and_pitch_are_xor(wav_1s: torch.Tensor) -> None:
             seed=7,
             speed_prob=1.0,
             pitch_prob=1.0,
-            vtlp_prob=0.0,
             gain_prob=0.0,
-            noise_prob=0.0,
-            rir_prob=0.0,
-            musan_root=None,
-            rir_root=None,
         )
         aug = aa.AudioAugmenter(cfg)
 
@@ -96,7 +91,7 @@ def test_augmenter_preserves_float32_dtype(wav_1s: torch.Tensor) -> None:
     from gp1.data.audio_aug import AudioAugmenter
     from gp1.types import AugConfig
 
-    cfg = AugConfig(seed=0, musan_root=None, rir_root=None)
+    cfg = AugConfig(seed=0)
     aug = AudioAugmenter(cfg)
 
     # Act
@@ -105,24 +100,3 @@ def test_augmenter_preserves_float32_dtype(wav_1s: torch.Tensor) -> None:
     # Assert
     assert out.dtype == torch.float32
     assert out.ndim == 1
-
-
-def test_augmenter_handles_missing_musan_and_rir_paths(wav_1s: torch.Tensor) -> None:
-    # Arrange
-    from gp1.data.audio_aug import AudioAugmenter
-    from gp1.types import AugConfig
-
-    cfg = AugConfig(
-        seed=1,
-        noise_prob=1.0,  # force-on, but musan_root is None -> must skip
-        rir_prob=1.0,
-        musan_root=None,
-        rir_root=None,
-    )
-    aug = AudioAugmenter(cfg)
-
-    # Act
-    out = aug(wav_1s)
-
-    # Assert: no crash, finite output
-    assert torch.isfinite(out).all()

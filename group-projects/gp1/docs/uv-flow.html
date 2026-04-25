@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>uv — как оно устроено</title>
+<style>
+  :root {
+    --bg: #0f1220;
+    --panel: #171a2b;
+    --line: #2b2f4a;
+    --accent: #7ab7ff;
+    --accent-2: #a78bfa;
+    --good: #6dd58c;
+    --warn: #ffb454;
+    --bad: #ff6b6b;
+    --text: #e5e7f0;
+    --mute: #8b90a8;
+    --code-bg: #0b0d18;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); font-family: -apple-system, "SF Pro Text", Inter, ui-sans-serif, system-ui, sans-serif; }
+  body { padding: 32px; line-height: 1.5; }
+  h1 { font-size: 28px; margin: 0 0 4px; }
+  .sub { color: var(--mute); margin-bottom: 24px; }
+  h2 { font-size: 20px; margin: 36px 0 12px; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
+  h3 { font-size: 16px; margin: 20px 0 8px; color: var(--accent); }
+  code, pre { font-family: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace; font-size: 13px; }
+  code { background: var(--code-bg); padding: 1px 6px; border-radius: 4px; color: #d7e2ff; }
+  pre { background: var(--code-bg); padding: 12px 14px; border-radius: 8px; overflow-x: auto; border: 1px solid var(--line); }
+  .grid { display: grid; gap: 16px; grid-template-columns: repeat(12, 1fr); }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; }
+  .card h3 { margin-top: 0; }
+  table { width: 100%; border-collapse: collapse; margin: 8px 0 0; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; font-size: 14px; }
+  th { color: var(--accent-2); font-weight: 600; }
+  .muted { color: var(--mute); }
+  .tag { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; letter-spacing: 0.3px; text-transform: uppercase; }
+  .tag.good { background: rgba(109,213,140,0.15); color: var(--good); }
+  .tag.warn { background: rgba(255,180,84,0.15); color: var(--warn); }
+  .tag.bad { background: rgba(255,107,107,0.15); color: var(--bad); }
+  .tag.info { background: rgba(122,183,255,0.15); color: var(--accent); }
+  svg { width: 100%; height: auto; display: block; }
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 10px; font-size: 13px; color: var(--mute); }
+  .legend .sw { display: inline-block; width: 12px; height: 12px; margin-right: 6px; border-radius: 3px; vertical-align: middle; }
+  .col-8 { grid-column: span 8; }
+  .col-4 { grid-column: span 4; }
+  .col-6 { grid-column: span 6; }
+  .col-12 { grid-column: span 12; }
+  @media (max-width: 900px) {
+    .col-8, .col-4, .col-6 { grid-column: span 12; }
+  }
+  ul { margin: 6px 0; padding-left: 20px; }
+  li { margin: 4px 0; }
+</style>
+</head>
+<body>
+
+<h1>uv — как оно устроено</h1>
+<div class="sub">Схема резолвера, lock-файла и синка окружения для проекта <code>itmo-gp1</code>. Редактируй блоки <code>&lt;text&gt;</code> в SVG или HTML-секциях.</div>
+
+<h2>1. Общий поток: pyproject.toml → uv.lock → .venv</h2>
+
+<div class="card col-12" style="grid-column: span 12;">
+<svg viewBox="0 0 1100 520" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#7ab7ff"/>
+    </marker>
+    <marker id="arrow-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#a78bfa"/>
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#6dd58c"/>
+    </marker>
+    <style><![CDATA[
+      .box { fill: #171a2b; stroke: #2b2f4a; stroke-width: 1.2; }
+      .box.input { stroke: #7ab7ff; }
+      .box.lock  { stroke: #a78bfa; }
+      .box.venv  { stroke: #6dd58c; }
+      .box.cli   { fill: #0b0d18; stroke: #3a4068; stroke-dasharray: 4 3; }
+      .t   { fill: #e5e7f0; font: 600 13px -apple-system, "SF Pro Text", Inter, ui-sans-serif, system-ui, sans-serif; }
+      .ts  { fill: #8b90a8; font: 500 11px "JetBrains Mono", ui-monospace, Menlo, monospace; }
+      .tc  { fill: #d7e2ff; font: 500 12px "JetBrains Mono", ui-monospace, Menlo, monospace; }
+      .edge { stroke: #7ab7ff; stroke-width: 1.5; fill: none; }
+      .edge.purple { stroke: #a78bfa; }
+      .edge.green  { stroke: #6dd58c; }
+      .edge.dashed { stroke-dasharray: 5 4; }
+      .title { fill: #a78bfa; font: 700 14px -apple-system, "SF Pro Text", sans-serif; letter-spacing: 0.5px; }
+    ]]></style>
+  </defs>
+
+  <text class="title" x="140"  y="26">INPUTS (что ты пишешь)</text>
+  <text class="title" x="510"  y="26">RESOLVER (uv lock)</text>
+  <text class="title" x="870"  y="26">MATERIALIZER (uv sync)</text>
+
+  <g>
+    <rect class="box input" x="40" y="60" width="300" height="120" rx="10"/>
+    <text class="t"  x="56" y="82">pyproject.toml</text>
+    <text class="ts" x="56" y="102">[project].dependencies</text>
+    <text class="ts" x="56" y="118">[project.optional-dependencies].*  (extras)</text>
+    <text class="ts" x="56" y="134">[dependency-groups].*              (groups)</text>
+    <text class="ts" x="56" y="150">[tool.uv.sources]                  (per-pkg index)</text>
+    <text class="ts" x="56" y="166">[tool.uv.index]                    (named indexes)</text>
+  </g>
+
+  <g>
+    <rect class="box input" x="40" y="200" width="300" height="70" rx="10"/>
+    <text class="t"  x="56" y="222">CLI / env</text>
+    <text class="ts" x="56" y="242">--extra / --all-extras, --group / --no-group</text>
+    <text class="ts" x="56" y="258">UV_PROJECT_ENVIRONMENT=path/to/.venv</text>
+  </g>
+
+  <g>
+    <rect class="box input" x="40" y="290" width="300" height="70" rx="10"/>
+    <text class="t"  x="56" y="312">Indexes</text>
+    <text class="ts" x="56" y="332">pypi.org (default)</text>
+    <text class="ts" x="56" y="348">download.pytorch.org/whl/cu128 (named)</text>
+  </g>
+
+  <g>
+    <rect class="box input" x="40" y="380" width="300" height="60" rx="10"/>
+    <text class="t"  x="56" y="402">Python toolchain</text>
+    <text class="ts" x="56" y="422">.python-version / requires-python / uv-managed</text>
+  </g>
+
+  <g>
+    <rect class="box lock" x="420" y="80" width="260" height="140" rx="10"/>
+    <text class="t"  x="436" y="104">uv resolver</text>
+    <text class="ts" x="436" y="122">• PubGrub SAT-solver</text>
+    <text class="ts" x="436" y="138">• markers (platform/py-version)</text>
+    <text class="ts" x="436" y="154">• extras + groups projections</text>
+    <text class="ts" x="436" y="170">• [tool.uv] conflicts split</text>
+    <text class="ts" x="436" y="186">• builds sdists for hash / deps</text>
+    <text class="ts" x="436" y="202">→ universal resolution</text>
+  </g>
+
+  <g>
+    <rect class="box lock" x="420" y="250" width="260" height="130" rx="10"/>
+    <text class="t"  x="436" y="274">uv.lock</text>
+    <text class="ts" x="436" y="292">Multi-platform pinned graph</text>
+    <text class="ts" x="436" y="308">• [[package]] name/version/src</text>
+    <text class="ts" x="436" y="324">• wheels[] + sdist (hashed)</text>
+    <text class="ts" x="436" y="340">• dependencies + markers</text>
+    <text class="ts" x="436" y="356">• optional-dependencies, groups</text>
+    <text class="ts" x="436" y="372">committed to VCS</text>
+  </g>
+
+  <g>
+    <rect class="box venv" x="760" y="80" width="300" height="140" rx="10"/>
+    <text class="t"  x="776" y="104">uv sync</text>
+    <text class="ts" x="776" y="122">1. выбирает подграф из lock</text>
+    <text class="ts" x="776" y="138">   по активным extras + groups</text>
+    <text class="ts" x="776" y="154">2. ставит wheels (или строит sdist)</text>
+    <text class="ts" x="776" y="170">3. инсталлит itmo-gp1 editable</text>
+    <text class="ts" x="776" y="186">4. удаляет всё, чего нет в подграфе</text>
+    <text class="ts" x="776" y="202">   (если не --inexact)</text>
+  </g>
+
+  <g>
+    <rect class="box venv" x="760" y="250" width="300" height="130" rx="10"/>
+    <text class="t"  x="776" y="274">.venv/</text>
+    <text class="ts" x="776" y="292">bin/python, bin/pip-less</text>
+    <text class="ts" x="776" y="308">lib/pythonX/site-packages/</text>
+    <text class="ts" x="776" y="324">  — torch, torchaudio, kenlm, …</text>
+    <text class="ts" x="776" y="340">  — itmo-gp1 (editable .pth)</text>
+    <text class="ts" x="776" y="356">UV_PROJECT_ENVIRONMENT → .venv-lm</text>
+    <text class="ts" x="776" y="372">(второй параллельный venv)</text>
+  </g>
+
+  <g>
+    <rect class="box cli" x="420" y="410" width="640" height="70" rx="10"/>
+    <text class="t"  x="436" y="432">uv run &lt;cmd&gt; / uv run python …</text>
+    <text class="ts" x="436" y="452">ленивый sync если lock/pyproject новее → затем запускает cmd в .venv</text>
+    <text class="ts" x="436" y="468">полезно в notebook/Makefile — активация venv не требуется</text>
+  </g>
+
+  <path class="edge" d="M340 120 C 380 120, 390 150, 420 150" marker-end="url(#arrow)"/>
+  <path class="edge" d="M340 235 C 380 235, 390 180, 420 180" marker-end="url(#arrow)"/>
+  <path class="edge" d="M340 325 C 380 325, 390 195, 420 195" marker-end="url(#arrow)"/>
+  <path class="edge" d="M340 410 C 380 410, 390 210, 420 210" marker-end="url(#arrow)"/>
+
+  <path class="edge purple" d="M550 220 L 550 250" marker-end="url(#arrow-purple)"/>
+
+  <path class="edge green" d="M680 150 C 720 150, 740 150, 760 150" marker-end="url(#arrow-green)"/>
+  <path class="edge green" d="M680 315 C 720 315, 740 315, 760 315" marker-end="url(#arrow-green)"/>
+
+  <path class="edge green" d="M910 220 L 910 250" marker-end="url(#arrow-green)"/>
+
+  <path class="edge dashed" d="M550 380 L 550 410" marker-end="url(#arrow-purple)"/>
+  <path class="edge green dashed" d="M910 380 L 910 410" marker-end="url(#arrow-green)"/>
+</svg>
+
+<div class="legend">
+  <span><span class="sw" style="background:#7ab7ff"></span>INPUTS — ручные источники истины</span>
+  <span><span class="sw" style="background:#a78bfa"></span>RESOLVER + lock — машинный артефакт</span>
+  <span><span class="sw" style="background:#6dd58c"></span>SYNC + .venv — материализация</span>
+  <span>--- пунктир — <code>uv run</code> запускает lazy-sync</span>
+</div>
+</div>
+
+<h2>2. Слои зависимостей в pyproject.toml</h2>
+
+<div class="grid">
+<div class="card col-6">
+<h3>[project].dependencies</h3>
+<p class="muted">Всегда ставятся. Все продакшен-импорты проекта.</p>
+<pre>dependencies = [
+  "torch==2.9.1",
+  "pyctcdecode&gt;=0.5.0",
+  "num2words&gt;=0.5.13",
+]</pre>
+<p><span class="tag good">default</span> попадают в любой <code>uv sync</code>.</p>
+</div>
+
+<div class="card col-6">
+<h3>[project.optional-dependencies]  (extras)</h3>
+<p class="muted">Опциональные «набор фич», стандарт PEP 621. Видны при <code>pip install itmo-gp1[bpe]</code>.</p>
+<pre>[project.optional-dependencies]
+bpe = ["sentencepiece&gt;=0.2.0"]</pre>
+<p>Ставятся только при <code>--extra bpe</code> / <code>--all-extras</code>. <span class="tag warn">off by default</span></p>
+</div>
+
+<div class="card col-6">
+<h3>[dependency-groups]  (PEP 735)</h3>
+<p class="muted">uv-родной способ. Удобнее extras для dev/lm/test — не тянутся когда кто-то ставит пакет как зависимость.</p>
+<pre>[dependency-groups]
+dev = ["pytest", "ipykernel", "pandas"]
+lm  = ["kenlm&gt;=0.2.0"]</pre>
+<p><code>--group lm</code> включит, <code>--no-group lm</code> выключит. <span class="tag info">группу можно сделать default</span></p>
+</div>
+
+<div class="card col-6">
+<h3>[tool.uv] default-groups</h3>
+<p class="muted">Какие <code>dependency-groups</code> попадают в <code>uv sync</code> без флагов.</p>
+<pre>[tool.uv]
+default-groups = ["dev", "lm"]</pre>
+<p>У нас <code>dev</code> + <code>lm</code> → kenlm ставится каждым <code>uv sync</code>. Убрать в CI: <code>--no-group lm</code>.</p>
+</div>
+
+<div class="card col-6">
+<h3>[tool.uv.sources] + [[tool.uv.index]]</h3>
+<p class="muted">Переопределяют <i>откуда</i> брать пакет, с маркерами платформы.</p>
+<pre>[[tool.uv.index]]
+name = "pytorch-cu128"
+url  = "https://download.pytorch.org/whl/cu128"
+explicit = true   # не использовать кроме явных ссылок
+
+[tool.uv.sources]
+torch      = [{ index = "pytorch-cu128",
+                marker = "sys_platform == 'linux'" }]
+torchaudio = [{ index = "pytorch-cu128",
+                marker = "sys_platform == 'linux'" }]</pre>
+<p>На Linux резолвер берёт torch с cu128-индекса (Blackwell sm_120), на macOS — с PyPI.</p>
+</div>
+
+<div class="card col-6">
+<h3>[tool.uv] conflicts</h3>
+<p class="muted">Декларация, что extras/groups несовместимы. Резолвер строит разные решения в одном lock.</p>
+<pre>[tool.uv]
+conflicts = [
+  [{ extra = "train" }, { extra = "lm" }]
+]</pre>
+<p>Нужно только если реально есть конфликт (разные numpy и т.п.). У нас сейчас не используется.</p>
+</div>
+</div>
+
+<h2>3. Ключевые команды и что они делают</h2>
+
+<div class="card col-12">
+<table>
+<thead><tr><th style="width:28%">Команда</th><th>Что делает</th><th style="width:22%">Побочка</th></tr></thead>
+<tbody>
+<tr>
+  <td><code>uv lock</code></td>
+  <td>Только решает зависимости и пишет <code>uv.lock</code>. Не трогает venv.</td>
+  <td><span class="tag info">safe</span></td>
+</tr>
+<tr>
+  <td><code>uv sync</code></td>
+  <td>Материализует <b>проекцию</b> lock в venv. Проекция = <code>dependencies</code> + default-groups + установленные <code>--extra</code>/<code>--group</code>.</td>
+  <td><span class="tag bad">удаляет лишнее</span></td>
+</tr>
+<tr>
+  <td><code>uv sync --extra lm</code></td>
+  <td>Расширяет проекцию указанным extra.</td>
+  <td><span class="tag info">safe</span></td>
+</tr>
+<tr>
+  <td><code>uv sync --no-group lm</code></td>
+  <td>Исключает группу, даже если она в <code>default-groups</code>.</td>
+  <td><span class="tag info">safe</span></td>
+</tr>
+<tr>
+  <td><code>uv sync --inexact</code></td>
+  <td>Не удалять пакеты, которых нет в проекции (ручные <code>pip install</code> выживут).</td>
+  <td><span class="tag warn">"грязный" venv</span></td>
+</tr>
+<tr>
+  <td><code>uv sync --frozen</code></td>
+  <td>Не перерешивать, даже если pyproject новее — пойдёт строго по lock. CI-стандарт.</td>
+  <td><span class="tag info">reproducible</span></td>
+</tr>
+<tr>
+  <td><code>uv add &lt;pkg&gt;</code></td>
+  <td>Редактирует <code>pyproject.toml</code> + перелочивает + синкает. Эквивалент <code>pip install -e .</code> + edit.</td>
+  <td><span class="tag info">safe</span></td>
+</tr>
+<tr>
+  <td><code>uv add --group lm kenlm</code></td>
+  <td>Добавляет пакет в конкретную группу.</td>
+  <td><span class="tag info">safe</span></td>
+</tr>
+<tr>
+  <td><code>uv run &lt;cmd&gt;</code></td>
+  <td>Прогоняет команду внутри managed venv, делая lazy-sync при необходимости.</td>
+  <td><span class="tag info">safe</span></td>
+</tr>
+<tr>
+  <td><code>uv pip install &lt;pkg&gt;</code></td>
+  <td>Ставит в текущий venv <b>в обход lock</b>. Всё, что поставлено так — будет снесено следующим <code>uv sync</code>.</td>
+  <td><span class="tag bad">смертник</span></td>
+</tr>
+<tr>
+  <td><code>UV_PROJECT_ENVIRONMENT=.venv-lm uv sync</code></td>
+  <td>Ставит синк во второй venv в этой же папке проекта. Удобно для двух несовместимых стеков.</td>
+  <td><span class="tag info">safe</span></td>
+</tr>
+</tbody>
+</table>
+</div>
+
+<h2>4. Проекция lock → venv: как собирается итоговый набор пакетов</h2>
+
+<div class="card col-12">
+<pre>projection = dependencies
+           ∪ (optional-deps[e] for e in extras_active)
+           ∪ (dependency-groups[g] for g in groups_active)
+
+groups_active = (default-groups ∪ --group) \ --no-group
+
+→ resolve_from_lock(projection)    # выбирает конкретные wheels из uv.lock
+→ install(set)                     # добавляет то, чего нет
+→ remove(venv \ set)                # ⚠ удаляет всё лишнее (если не --inexact)
+</pre>
+<p class="muted">Именно шаг «remove» и съедал <code>kenlm</code> / <code>pandas</code> — их не было в активной проекции.</p>
+</div>
+
+<h2>5. Два окружения в одном проекте</h2>
+<div class="card col-12">
+<pre># train-окружение: всё кроме lm
+uv sync --no-group lm
+
+# lm-окружение (инференс с KenLM) — отдельный venv
+UV_PROJECT_ENVIRONMENT=.venv-lm uv sync --group lm
+
+# jupyter kernels
+UV_PROJECT_ENVIRONMENT=.venv     uv run python -m ipykernel install --user --name gp1
+UV_PROJECT_ENVIRONMENT=.venv-lm  uv run python -m ipykernel install --user --name gp1-lm</pre>
+<p class="muted">Сейчас не нужно — один venv справляется. Оставить как рецепт на случай, если torch ≥ 2.11 реально потребует иного numpy, чем kenlm.</p>
+</div>
+
+<h2>6. Шпаргалка по файлу нашего проекта</h2>
+<div class="card col-12">
+<pre>pyproject.toml
+├── [project].dependencies            # torch==2.9.1 (cu128), torchaudio, pyctcdecode, …
+├── [project.optional-dependencies]
+│   └── bpe = [sentencepiece]         # uv sync --extra bpe
+├── [dependency-groups]
+│   ├── dev = [pytest, ipykernel, pandas, …]
+│   └── lm  = [kenlm]
+├── [tool.uv]
+│   └── default-groups = ["dev", "lm"]   # → goes in every `uv sync`
+├── [[tool.uv.index]] pytorch-cu128   # Blackwell sm_120 wheels
+└── [tool.uv.sources] torch, torchaudio → pytorch-cu128 (только linux)</pre>
+</div>
+
+<p class="muted" style="margin-top: 24px;">Файл можно редактировать в любом редакторе. Все цвета и тексты — inline. Перерисовать SVG — меняй координаты <code>x</code>/<code>y</code> у <code>&lt;rect&gt;</code>/<code>&lt;text&gt;</code>/<code>&lt;path&gt;</code>.</p>
+
+</body>
+</html>
