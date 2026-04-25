@@ -107,14 +107,11 @@ src/gp1/               # Reusable, architecture-neutral library
 notebooks/
 ├── 01_quartznet.ipynb               # HP random search + train (NovoGrad + cosine)
 ├── 02_crdnn.ipynb                   # (AdamW + cosine)
-├── 03_efficient_conformer.ipynb     # (AdamW + Noam, s=4)
-├── 04_fast_conformer_bpe.ipynb      # (BPE-256 + Noam)
-├── 05_predict.ipynb                 # load best checkpoint → submission.csv
+├── 03_decode_kenlm.ipynb                 # lm decoding
 └── experiments/
     ├── 01a_quartznet_inter_ctc.ipynb     # inline InterCTCHead + raw training loop
     ├── 01b_quartznet_word_aux.ipynb      # inline WordVocab + WordAuxCTCHead
     ├── 01c_quartznet_cr_ctc.ipynb        # inline CRCTCLoss with two SpecAug views
-    └── 06_kenlm_beam_rescore.ipynb       # train KenLM + beam rescore
 
 tests/                 # Reusable-core tests only (data, features, vocab, losses/ctc, models, trainer, decoding, metrics)
 pyproject.toml         # uv-managed, Python 3.11, torch 2.5.1 + deps
@@ -124,23 +121,11 @@ pyproject.toml         # uv-managed, Python 3.11, torch 2.5.1 + deps
 
 1. **Setup.** `uv sync` locally. On Colab/Kaggle, the first two cells of every notebook contain platform-specific `!git clone` + `!pip install` blocks (commented out) — uncomment the one matching your platform.
 2. **Fill paths.** The "Пути (заполните вручную)" cell at the top of every notebook declares explicit `TRAIN_ROOT`, `DEV_ROOT`, `TRAIN_CSV`, `DEV_CSV`, `CKPT_ROOT`, optional `TEST_ROOT`. Replace each `FILL_ME_IN` with a real `Path`.
-3. **Pick an architecture.** Open one of the four main notebooks (`01_quartznet` / `02_crdnn` / `03_efficient_conformer` / `04_fast_conformer_bpe`). Each is a complete step-by-step pipeline: data → vocab → model → trainer → HP random search → best checkpoint.
+3. **Pick an architecture.** Open one of the four main notebooks (`01_quartznet` / `02_crdnn`). Each is a complete step-by-step pipeline: data → vocab → model → trainer → HP random search → best checkpoint.
 4. **Tune HPs.** Each notebook has two dicts:
    - `FIXED` — audio/batching params you don't vary per trial.
    - `HP_GRID` — axes to randomize (lr, dropout, SpecAug, augmentation probs, ...).
    - `N_TRIALS` — how many random configurations to try.
 5. **Run the notebook.** The HP loop saves the best checkpoint per trial under `<CKPT_ROOT>/<run_id>/trial_XX/best.pt` + `meta.json` describing `arch`, `hparams`, `val_cer`.
-6. **Predict.** Open `05_predict.ipynb`, point `CKPT` to any `best.pt`, it rebuilds the matching model and writes `submission.csv`.
+6. **Predict.** Open `03_decode_kenlm.ipynb`, point `CKPT` to any `best.pt`, it rebuilds the matching model and writes `submission.csv`.
 7. **Optional experiments.** `notebooks/experiments/` contains self-contained demos of auxiliary losses (`inter_ctc`, `word_aux`, `cr_ctc`) and a KenLM beam rescore recipe. They keep their extra classes inline — open one and see the whole picture.
-
-## Testing
-
-```
-.venv/bin/python -m pytest tests/ -m "not slow"
-```
-
-Tests cover only architecture-neutral infrastructure (dataset, collate, features, vocab, CTC loss, trainer, decoding, metrics, per-architecture shape contracts). Architecture-specific experiments are validated by running their notebooks.
-
-## Why this layout
-
-Everything architecture-specific (loss heads for InterCTC / CR-CTC / WordAux, model constructors, optimizer choice, scheduler choice) lives in the notebooks — the reader sees the whole pipeline in one file and can step-debug any cell. The `src/` library is intentionally arch-neutral: no `if model_name == ...` branches, no dispatcher, no YAML configs, no auto-detection of platform — all hyperparameters and paths are Python constants at the top of each notebook, filled in by hand.
